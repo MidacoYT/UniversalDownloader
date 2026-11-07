@@ -425,7 +425,7 @@ fn info_card(ui: &mut egui::Ui, rows: &[(&str, &str)]) {
         .corner_radius(8)
         .inner_margin(egui::Margin::same(12))
         .show(ui, |ui| {
-            ui.set_width(ui.available_width());
+            ui.set_max_width(ui.available_width());
             for (index, (label, value)) in rows.iter().enumerate() {
                 if index > 0 {
                     ui.add_space(12.0);
@@ -474,17 +474,11 @@ fn genres(ui: &mut egui::Ui, game: &Game) {
                 .corner_radius(20)
                 .inner_margin(egui::Margin::symmetric(10, 5))
                 .show(ui, |ui| {
-                    ui.set_max_width(ui.available_width());
-                    ui.horizontal(|pill| {
-                        pill.add(
-                            egui::Label::new(
-                            RichText::new(genre)
-                                .size(11.0)
-                                .color(Color32::from_rgb(196, 181, 253)),
-                        )
-                        .truncate(),
-                        );
-                    });
+                    ui.label(
+                        RichText::new(genre)
+                            .size(11.0)
+                            .color(Color32::from_rgb(196, 181, 253)),
+                    );
                 });
         }
     });
