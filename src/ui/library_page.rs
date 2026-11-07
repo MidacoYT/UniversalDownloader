@@ -103,9 +103,9 @@ fn empty_state(ui: &mut egui::Ui, nothing_scanned: bool) {
     ui.add_space(24.0);
     ui.vertical_centered(|ui| {
         let text = if nothing_scanned {
-            "No game folders found. Choose another folder."
+            "No supported games found. Choose another folder or scan again after loading the catalogs."
         } else {
-            "No results for this filter."
+            "No supported games found in this folder, or no games match this filter."
         };
         ui.label(RichText::new(text).color(Color32::GRAY));
     });

@@ -138,6 +138,11 @@ impl Library {
         for entry in &mut self.entries {
             entry.game_id = match_installed_game(&entry.name, &titles).map(|g| g.id.clone());
         }
+        let supported = self.entries.iter().filter(|entry| entry.game_id.is_some()).count();
+        self.status = format!(
+            "{supported} supported game{} found in the selected folder.",
+            if supported == 1 { "" } else { "s" }
+        );
     }
 
     /// Lignes filtrées et triées pour l'affichage. `catalogs` : tous les catalogues où chercher
@@ -152,8 +157,11 @@ impl Library {
                     catalogs
                         .iter()
                         .find_map(|games| games.iter().find(|g| g.id == id))
-                });
-                let row = LibraryRow { entry, game };
+                })?;
+                let row = LibraryRow {
+                    entry,
+                    game: Some(game),
+                };
                 (entry.name.to_lowercase().contains(&filter)
                     || row.title().to_lowercase().contains(&filter))
                 .then_some(row)
