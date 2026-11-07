@@ -239,7 +239,50 @@ fn remove_game_folder(entry: &LibraryEntry, library_root: &str) -> Result<(), St
     if !target.is_dir() {
         return Err("The selected game folder no longer exists.".into());
     }
+    unregister_packages_in_folder(&target)?;
     std::fs::remove_dir_all(&target).map_err(|e| format!("Could not remove the game folder: {e}"))
+}
+
+/// Retire de Windows les paquets Appx enregistrés depuis ce dossier avant d'en supprimer les
+/// fichiers. Les jeux Epic et les dossiers sans paquet enregistré ne sont pas affectés.
+#[cfg(windows)]
+fn unregister_packages_in_folder(target: &Path) -> Result<(), String> {
+    use std::process::{Command, Stdio};
+
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+$target = [IO.Path]::GetFullPath($env:UD_UNINSTALL_TARGET).TrimEnd('\')
+$packages = Get-AppxPackage | Where-Object {
+    if (-not $_.InstallLocation) { return $false }
+    $location = [IO.Path]::GetFullPath($_.InstallLocation).TrimEnd('\')
+    $location.Equals($target, [StringComparison]::OrdinalIgnoreCase) -or
+        $location.StartsWith($target + '\', [StringComparison]::OrdinalIgnoreCase)
+}
+foreach ($package in $packages) {
+    Remove-AppxPackage -Package $package.PackageFullName -ErrorAction Stop
+}
+"#;
+    let output = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])
+        .env("UD_UNINSTALL_TARGET", target)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("Could not start Windows package removal: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let details = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        Err(if details.is_empty() {
+            format!("Windows package removal exited with {}.", output.status)
+        } else {
+            format!("Could not unregister the Xbox game from Windows: {details}")
+        })
+    }
+}
+
+#[cfg(not(windows))]
+fn unregister_packages_in_folder(_target: &Path) -> Result<(), String> {
+    Ok(())
 }
 
 /// Longueur minimale d'un titre normalisé pour être associé à un dossier.
