@@ -139,6 +139,7 @@ impl App {
                     GameStore::Xbox => &mut self.catalog,
                     GameStore::Epic => &mut self.epic_catalog,
                 };
+                catalog.scroll_top = true;
                 if catalog.games.is_empty() && !catalog.is_loading() {
                     catalog.refresh();
                 }

@@ -19,80 +19,75 @@ pub fn show(
     out: &mut Vec<Action>,
 ) {
     catalog.refresh_visible(library);
-    widgets::page_header(
-        ui,
-        "DISCOVER",
-        "Game catalog",
-        "Choose a store, then browse its games.",
-    );
-    store_selector(ui, selected_store, out);
-    ui.add_space(14.0);
-    toolbar(ui, catalog, out);
-    genre_filter(ui, catalog);
-    let total_pages = catalog.total_pages();
-    catalog.page_index = catalog.page_index.min(total_pages - 1);
-
-    widgets::status_line(ui, catalog.is_loading(), &catalog.status);
-    pagination(ui, catalog, total_pages);
-    ui.add_space(6.0);
-
     let mut area = egui::ScrollArea::vertical()
-        .id_salt("catalog_scroll")
+        .id_salt(("catalog_scroll", catalog.store as u8))
         .auto_shrink([false, false]);
     if std::mem::take(&mut catalog.scroll_top) {
         area = area.vertical_scroll_offset(0.0);
     }
-    let catalog = &*catalog;
-    area.show(ui, |ui| ui.winui(|ui| grid(ui, catalog, images, out)));
+    area.show(ui, |ui| {
+        ui.winui(|ui| {
+            widgets::page_header(
+                ui,
+                "DISCOVER",
+                "Game catalog",
+                "Browse Xbox Game Pass and Epic Games.",
+            );
+            toolbar(ui, catalog, out);
+            genre_filter(ui, catalog);
+            let total_pages = catalog.total_pages();
+            catalog.page_index = catalog.page_index.min(total_pages - 1);
+
+            widgets::status_line(ui, catalog.is_loading(), &catalog.status);
+            ui.add_space(8.0);
+            grid(ui, catalog, images, out);
+            ui.add_space(12.0);
+            pagination(ui, catalog, total_pages);
+            ui.add_space(10.0);
+            ui.separator();
+            store_selector(ui, selected_store, out);
+        });
+    });
 }
 
 fn store_selector(ui: &mut egui::Ui, selected: GameStore, out: &mut Vec<Action>) {
-    ui.columns(2, |columns| {
-        store_button(&mut columns[0], GameStore::Xbox, selected, out);
-        store_button(&mut columns[1], GameStore::Epic, selected, out);
+    ui.add_space(8.0);
+    ui.vertical_centered(|ui| {
+        ui.label(widgets::muted("Switch catalog", 10.0));
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.add_space((ui.available_width() - 392.0).max(0.0) / 2.0);
+            store_button(ui, GameStore::Xbox, selected, out);
+            ui.add_space(8.0);
+            store_button(ui, GameStore::Epic, selected, out);
+        });
     });
 }
 
 fn store_button(ui: &mut egui::Ui, store: GameStore, selected: GameStore, out: &mut Vec<Action>) {
-    let (title, subtitle, logo) = match store {
-        GameStore::Xbox => (
-            "XBOX GAME PASS",
-            "Xbox games catalog",
-            icons::xbox_game_pass(48.0),
-        ),
-        GameStore::Epic => ("EPIC GAMES", "Epic Games catalog", icons::epic_games(48.0)),
+    let (title, logo) = match store {
+        GameStore::Xbox => ("Xbox Game Pass", icons::xbox_game_pass(24.0)),
+        GameStore::Epic => ("Epic Games", icons::epic_games(24.0)),
     };
     let is_selected = store == selected;
-    let response = egui::Frame::new()
-        .fill(if is_selected {
-            super::theme::accent_alpha(34)
-        } else {
-            super::theme::BG_CARD
-        })
+    let fill = if is_selected {
+        super::theme::accent_alpha(55)
+    } else {
+        super::theme::BG_CARD
+    };
+    let stroke = if is_selected {
+        super::theme::ACCENT_LIGHT
+    } else {
+        super::theme::accent_alpha(75)
+    };
+    let button = egui::Button::image_and_text(logo, title)
+        .fill(fill)
         .stroke(egui::Stroke::new(
             if is_selected { 1.5 } else { 1.0 },
-            if is_selected {
-                super::theme::ACCENT_LIGHT
-            } else {
-                super::theme::accent_alpha(75)
-            },
+            stroke,
         ))
-        .corner_radius(12)
-        .inner_margin(egui::Margin::symmetric(16, 12))
-        .show(ui, |ui| {
-            ui.set_min_height(66.0);
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.add(logo);
-                ui.add_space(10.0);
-                ui.vertical(|ui| {
-                    ui.label(RichText::new(title).size(14.0).strong());
-                    ui.label(RichText::new(subtitle).size(11.0).color(Color32::GRAY));
-                });
-            });
-        })
-        .response;
-    if response.interact(egui::Sense::click()).clicked() {
+        .corner_radius(9);
+    if ui.add_sized(egui::vec2(190.0, 42.0), button).clicked() {
         out.push(Action::SelectCatalog(store));
     }
 }
