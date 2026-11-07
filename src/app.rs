@@ -15,6 +15,7 @@ use crate::updates::UpdateCheck;
 use eframe::egui;
 use fluent_egui::winui::prelude::*;
 use fluent_egui::winui::{self, BackdropKind, FluentTheme};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
 const SIDEBAR_W: f32 = 232.0;
@@ -24,6 +25,8 @@ pub struct App {
     page: Page,
     catalog: Catalog,
     epic_catalog: Catalog,
+    epic_stats_tx: Sender<(String, Result<(Option<u8>, Option<u8>), String>)>,
+    epic_stats_rx: Receiver<(String, Result<(Option<u8>, Option<u8>), String>)>,
     selected_catalog: GameStore,
     library: Library,
     settings: Settings,
@@ -31,7 +34,7 @@ pub struct App {
     downloads: DownloadManager,
     download_name: String,
     images: ImageCache,
-    selected: Option<String>,
+    selected: Option<(GameStore, String)>,
     modal: ModalState,
     pending_uninstall: Option<LibraryEntry>,
     trailer: TrailerPlayer,
@@ -40,10 +43,13 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
+        let (epic_stats_tx, epic_stats_rx) = mpsc::channel();
         let mut app = Self {
             page: Page::Home,
             catalog: Catalog::new(GameStore::Xbox),
             epic_catalog: Catalog::new(GameStore::Epic),
+            epic_stats_tx,
+            epic_stats_rx,
             selected_catalog: GameStore::Xbox,
             library: Library::new(),
             settings: Settings::load(),
@@ -58,6 +64,7 @@ impl App {
             backdrop_applied: false,
         };
         app.catalog.refresh();
+        app.epic_catalog.refresh();
         app.scan_library();
         app
     }
@@ -87,6 +94,22 @@ impl App {
         self.images.poll(ctx);
         let catalog_changed = self.catalog.poll();
         let epic_catalog_changed = self.epic_catalog.poll();
+        let epic_stats_updates: Vec<_> = self.epic_stats_rx.try_iter().collect();
+        let epic_stats_changed = !epic_stats_updates.is_empty();
+        for (id, result) in epic_stats_updates {
+            if let Some(game) = self
+                .epic_catalog
+                .games
+                .iter_mut()
+                .find(|game| game.id == id)
+            {
+                game.epic_stats_loaded = true;
+                if let Ok((score, recommend)) = result {
+                    game.critic_score = score;
+                    game.critic_recommend = recommend;
+                }
+            }
+        }
         let library_changed = self.library.poll();
         self.updates.poll();
         let completed_before = self
@@ -111,6 +134,7 @@ impl App {
         if self.catalog.is_loading()
             || self.epic_catalog.is_loading()
             || epic_catalog_changed
+            || epic_stats_changed
             || self.library.is_scanning()
             || self.updates.is_loading()
             || self.downloads.is_active()
@@ -144,9 +168,31 @@ impl App {
                     catalog.refresh();
                 }
             }
-            Action::OpenGame(id) => {
+            Action::OpenGame { id, store } => {
                 self.modal = ModalState::default();
-                self.selected = Some(id);
+                if store == GameStore::Epic {
+                    let request = self
+                        .epic_catalog
+                        .games
+                        .iter_mut()
+                        .find(|game| game.id == id)
+                        .and_then(|game| {
+                            if game.egdata_offer_id.is_empty() || game.epic_stats_requested {
+                                None
+                            } else {
+                                game.epic_stats_requested = true;
+                                Some((game.id.clone(), game.egdata_offer_id.clone()))
+                            }
+                        });
+                    if let Some((game_id, offer_id)) = request {
+                        let tx = self.epic_stats_tx.clone();
+                        std::thread::spawn(move || {
+                            let result = crate::catalog::api::fetch_epic_critic_stats(&offer_id);
+                            let _ = tx.send((game_id, result));
+                        });
+                    }
+                }
+                self.selected = Some((store, id));
             }
             Action::PrepareDownload { id, name, store } => {
                 self.trailer.close();
@@ -225,7 +271,14 @@ impl App {
 
     fn show_page(&mut self, ui: &mut egui::Ui, out: &mut Vec<Action>) {
         match self.page {
-            Page::Home => home::show(ui, &self.catalog, &self.library, &mut self.images, out),
+            Page::Home => home::show(
+                ui,
+                &self.catalog,
+                &self.epic_catalog,
+                &self.library,
+                &mut self.images,
+                out,
+            ),
             Page::Catalog => match self.selected_catalog {
                 GameStore::Xbox => catalog_page::show(
                     ui,
@@ -298,11 +351,11 @@ impl App {
 
     fn show_modals(&mut self, ctx: &egui::Context, frame: &eframe::Frame, out: &mut Vec<Action>) {
         let interactive = !self.trailer.is_open();
-        if let Some(game) = self
-            .selected
-            .as_deref()
-            .and_then(|id| self.catalog.game(id))
-        {
+        let selected_game = self.selected.as_ref().and_then(|(store, id)| match store {
+            GameStore::Xbox => self.catalog.game(id),
+            GameStore::Epic => self.epic_catalog.game(id),
+        });
+        if let Some(game) = selected_game {
             game_modal::show(
                 ctx,
                 game,

@@ -182,7 +182,10 @@ fn buttons(ui: &mut egui::Ui, row: &LibraryRow, out: &mut Vec<Action>) {
     if let Some(game) = row.game {
         if ui.button("View details").clicked() {
             out.push(Action::Navigate(Page::Catalog));
-            out.push(Action::OpenGame(game.id.clone()));
+            out.push(Action::OpenGame {
+                id: game.id.clone(),
+                store: game.store,
+            });
         }
     }
     if ui.button("Open folder").clicked() {

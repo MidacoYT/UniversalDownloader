@@ -164,7 +164,11 @@ fn hero(ui: &mut egui::Ui, game: &Game, texture: Option<&TextureHandle>) -> bool
     painter.text(
         badge.center(),
         egui::Align2::CENTER_CENTER,
-        if game.ea_play { "EA PLAY" } else { "GAME PASS" },
+        match game.store {
+            GameStore::Xbox if game.ea_play => "EA PLAY",
+            GameStore::Xbox => "GAME PASS",
+            GameStore::Epic => "EPIC GAMES",
+        },
         egui::FontId::proportional(10.0),
         Color32::WHITE,
     );
@@ -232,7 +236,13 @@ fn body(
         .corner_radius(10)
         .inner_margin(egui::Margin::same(14))
         .show(ui, |ui| {
-            ui.label(or_fallback(&game.description, "No description available."));
+            let description = if game.store == GameStore::Epic && !game.long_description.is_empty()
+            {
+                clean_epic_description(&game.long_description)
+            } else {
+                game.description.clone()
+            };
+            ui.label(or_fallback(&description, "No description available."));
         });
 
     heading(ui, "Additional Information");
@@ -303,11 +313,32 @@ fn or_fallback<'a>(value: &'a str, fallback: &'a str) -> &'a str {
     if value.is_empty() { fallback } else { value }
 }
 
+fn clean_epic_description(value: &str) -> String {
+    value
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || (line.starts_with("<!--") && line.ends_with("-->")) {
+                return None;
+            }
+            let clean = line.trim_start_matches('#').trim();
+            (!clean.is_empty()).then(|| clean.to_owned())
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 fn stats_row(ui: &mut egui::Ui, game: &Game) {
-    let reviews = if game.rating_count == 0 {
-        "New game".to_owned()
-    } else {
-        format!("{} reviews", format_count(game.rating_count))
+    let reviews = match game.store {
+        GameStore::Epic => match game.critic_score {
+            Some(score) => format!("OpenCritic {score}/100"),
+            None if game.epic_stats_requested && !game.epic_stats_loaded => {
+                "Loading rating…".into()
+            }
+            None => "No critic rating".into(),
+        },
+        GameStore::Xbox if game.rating_count == 0 => "New game".to_owned(),
+        GameStore::Xbox => format!("{} reviews", format_count(game.rating_count)),
     };
     let stats = [
         (icons::star(14.0), reviews),
@@ -355,17 +386,23 @@ fn stats_row(ui: &mut egui::Ui, game: &Game) {
 
 fn info_cards(ui: &mut egui::Ui, game: &Game) {
     let mut right = vec![("Release date", game.release.as_str())];
+    let recommendation = game
+        .critic_recommend
+        .map(|percent| format!("OpenCritic recommends · {percent}%"));
     if !game.platform.is_empty() {
         right.push(("Platforms", game.platform.as_str()));
     }
     ui.columns(2, |columns| {
-        info_card(
-            &mut columns[0],
-            &[
-                ("Publisher", &game.publisher),
-                ("Developer", &game.developer),
-            ],
-        );
+        info_card(&mut columns[0], &{
+            let mut rows = vec![
+                ("Publisher", game.publisher.as_str()),
+                ("Developer", game.developer.as_str()),
+            ];
+            if let Some(recommendation) = recommendation.as_deref() {
+                rows.push(("Critic sentiment", recommendation));
+            }
+            rows
+        });
         info_card(&mut columns[1], &right);
     });
 }

@@ -112,6 +112,16 @@ pub fn parse_epic_catalog(data: &Value) -> Result<Vec<Game>, String> {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned(),
+            long_description: item
+                .get("longDescription")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            egdata_offer_id: item
+                .get("egdataOfferId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
             launch_exe: item
                 .get("launchExe")
                 .and_then(Value::as_str)
@@ -163,6 +173,31 @@ pub fn parse_epic_catalog(data: &Value) -> Result<Vec<Game>, String> {
         if let Some(release) = item.get("releaseDate").and_then(Value::as_str) {
             game.release = release.to_owned();
         }
+        // Epic tags identify broad player modes, but not player limits or a
+        // live concurrent-player count.
+        let has_single_player = game.genres.iter().any(|tag| {
+            tag.eq_ignore_ascii_case("single player") || tag.eq_ignore_ascii_case("single-player")
+        });
+        let has_multiplayer = game.genres.iter().any(|tag| {
+            tag.eq_ignore_ascii_case("multiplayer") || tag.eq_ignore_ascii_case("co-op")
+        });
+        game.players = match (has_single_player, has_multiplayer) {
+            (true, true) => "Single-player · Multiplayer".into(),
+            (true, false) => "Single-player".into(),
+            (false, true) => "Multiplayer".into(),
+            (false, false) => String::new(),
+        };
+        game.rating = item
+            .get("pegi")
+            .or_else(|| item.get("ageRating"))
+            .or_else(|| item.get("rating"))
+            .and_then(|value| {
+                value
+                    .as_str()
+                    .or_else(|| value.get("pegi").and_then(Value::as_str))
+            })
+            .unwrap_or_default()
+            .to_owned();
         game.refresh_search_key();
         games.push(game);
     }
@@ -171,6 +206,26 @@ pub fn parse_epic_catalog(data: &Value) -> Result<Vec<Game>, String> {
         return Err("Epic API contains no valid game manifests.".into());
     }
     Ok(games)
+}
+
+/// Loads the public critic summary for one Epic offer on demand.
+pub fn fetch_epic_critic_stats(offer_id: &str) -> Result<(Option<u8>, Option<u8>), String> {
+    let client = net::client(20).map_err(|error| error.to_string())?;
+    let data: Value = client
+        .get(format!("https://api.egdata.app/offers/{offer_id}/ratings"))
+        .send()
+        .and_then(|response| response.error_for_status())
+        .and_then(|response| response.json())
+        .map_err(|error| format!("Could not load EGData ratings: {error}"))?;
+    let score = data
+        .get("criticAverage")
+        .and_then(Value::as_u64)
+        .and_then(|value| u8::try_from(value).ok());
+    let recommend = data
+        .get("recommendPercentage")
+        .and_then(Value::as_u64)
+        .and_then(|value| u8::try_from(value).ok());
+    Ok((score, recommend))
 }
 
 fn download_catalog(client: &Client) -> Result<Vec<Game>, String> {

@@ -52,7 +52,10 @@ pub fn show(
     ui.ctx()
         .data_mut(|d| d.insert_temp(hover_id, frame.response.rect));
     if open.is_some_and(|r| r.clicked()) {
-        out.push(Action::OpenGame(game.id.clone()));
+        out.push(Action::OpenGame {
+            id: game.id.clone(),
+            store: game.store,
+        });
     }
 }
 
@@ -153,12 +156,15 @@ fn body(card: &mut egui::Ui, game: &Game, loading: bool, out: &mut Vec<Action>) 
                 ui,
                 vec![
                     (icons::storage(13.0), or_default(&game.size, "- GB")),
-                    (icons::players(13.0), or_default(&game.players, "- players")),
+                    (
+                        icons::players(13.0),
+                        or_default(&game.players, "Player info n/a"),
+                    ),
                 ],
             );
             meta_row(
                 ui,
-                vec![(icons::shield(13.0), or_default(&game.rating, "PEGI -"))],
+                vec![(icons::shield(13.0), or_default(&game.rating, "PEGI n/a"))],
             );
             ui.add_space(10.0);
             actions(ui, game, out);
@@ -212,7 +218,10 @@ fn actions(ui: &mut egui::Ui, game: &Game, out: &mut Vec<Action>) {
                 }
             }
             if ui.add(egui::Button::image(icons::info(16.0))).clicked() {
-                out.push(Action::OpenGame(game.id.clone()));
+                out.push(Action::OpenGame {
+                    id: game.id.clone(),
+                    store: game.store,
+                });
             }
         },
     );

@@ -35,7 +35,10 @@ pub enum Page {
 pub enum Action {
     Navigate(Page),
     SelectCatalog(crate::model::GameStore),
-    OpenGame(String),
+    OpenGame {
+        id: String,
+        store: crate::model::GameStore,
+    },
     PrepareDownload {
         id: String,
         name: String,
