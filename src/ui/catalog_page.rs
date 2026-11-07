@@ -19,15 +19,6 @@ pub fn show(
     out: &mut Vec<Action>,
 ) {
     catalog.refresh_visible(library);
-    widgets::page_header(
-        ui,
-        "DISCOVER",
-        "Game catalog",
-        "Browse Xbox Game Pass and Epic Games.",
-    );
-    store_selector(ui, selected_store, out);
-    ui.add_space(8.0);
-
     let mut area = egui::ScrollArea::vertical()
         .id_salt(("catalog_scroll", catalog.store as u8))
         .max_height(ui.available_height())
@@ -37,6 +28,14 @@ pub fn show(
     }
     area.show(ui, |ui| {
         ui.winui(|ui| {
+            widgets::page_header(
+                ui,
+                "DISCOVER",
+                "Game catalog",
+                "Browse Xbox Game Pass and Epic Games.",
+            );
+            store_selector(ui, selected_store, out);
+            ui.add_space(10.0);
             toolbar(ui, catalog, out);
             genre_filter(ui, catalog);
             let total_pages = catalog.total_pages();
@@ -57,9 +56,9 @@ fn store_selector(ui: &mut egui::Ui, selected: GameStore, out: &mut Vec<Action>)
         ui.label(widgets::muted("Switch catalog", 10.0));
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.add_space((ui.available_width() - 392.0).max(0.0) / 2.0);
+            ui.add_space((ui.available_width() - 548.0).max(0.0) / 2.0);
             store_button(ui, GameStore::Xbox, selected, out);
-            ui.add_space(8.0);
+            ui.add_space(12.0);
             store_button(ui, GameStore::Epic, selected, out);
         });
     });
@@ -67,8 +66,8 @@ fn store_selector(ui: &mut egui::Ui, selected: GameStore, out: &mut Vec<Action>)
 
 fn store_button(ui: &mut egui::Ui, store: GameStore, selected: GameStore, out: &mut Vec<Action>) {
     let (title, logo) = match store {
-        GameStore::Xbox => ("Xbox Game Pass", icons::xbox_game_pass(24.0)),
-        GameStore::Epic => ("Epic Games", icons::epic_games(24.0)),
+        GameStore::Xbox => ("Xbox Game Pass", icons::xbox_game_pass(34.0)),
+        GameStore::Epic => ("Epic Games", icons::epic_games(34.0)),
     };
     let is_selected = store == selected;
     let fill = if is_selected {
@@ -88,7 +87,7 @@ fn store_button(ui: &mut egui::Ui, store: GameStore, selected: GameStore, out: &
             stroke,
         ))
         .corner_radius(9);
-    if ui.add_sized(egui::vec2(190.0, 42.0), button).clicked() {
+    if ui.add_sized(egui::vec2(268.0, 62.0), button).clicked() {
         out.push(Action::SelectCatalog(store));
     }
 }
