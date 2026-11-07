@@ -1400,11 +1400,11 @@ fn resolve_asset_dir(folder: &str, override_key: &str, legacy_relative: &str) ->
 fn read_developer_mode() -> Option<u32> {
     let mut command = Command::new("reg.exe");
     command.args([
-            "query",
-            r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock",
-            "/v",
-            "AllowDevelopmentWithoutDevLicense",
-        ]);
+        "query",
+        r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock",
+        "/v",
+        "AllowDevelopmentWithoutDevLicense",
+    ]);
     hide_child_console(&mut command);
     let output = command.output().ok()?;
     if !output.status.success() {

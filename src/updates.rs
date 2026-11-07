@@ -167,7 +167,8 @@ impl UpdateCheck {
                         changed = true;
                     }
                     Ok(InstallEvent::Finished(Ok(()))) => {
-                        self.status = "Restarting Universal Downloader to install the update…".into();
+                        self.status =
+                            "Restarting Universal Downloader to install the update…".into();
                         self.install_progress = None;
                         self.restart_requested = true;
                         finished = true;
@@ -349,7 +350,14 @@ Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
 "#;
     let mut command = Command::new("powershell.exe");
     command
-        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", helper])
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            helper,
+        ])
         .env("UD_UPDATE_PARENT_PID", std::process::id().to_string())
         .env("UD_UPDATE_INSTALLER", &installer_path)
         .env("UD_UPDATE_APP", &app_path)
@@ -363,16 +371,19 @@ Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
     }
     if let Err(error) = command.spawn() {
         let _ = fs::remove_file(&installer_path);
-        return Err(format!("could not start the hidden update/restart helper: {error}"));
+        return Err(format!(
+            "could not start the hidden update/restart helper: {error}"
+        ));
     }
     Ok(())
 }
 
-
 /// True when the current executable lives under Program Files (Inno Setup install).
 /// A debug build or a manually moved copy is treated as portable.
 fn is_installed_app() -> bool {
-    let Ok(exe) = std::env::current_exe() else { return false };
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
     let exe = exe.canonicalize().unwrap_or(exe);
     ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"]
         .iter()
