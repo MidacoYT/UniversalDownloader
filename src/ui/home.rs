@@ -209,9 +209,13 @@ fn top_games_row(
                 },
             )
             .inner;
+        ui.add_space(6.0);
+        let viewport_width = (ui.available_width() - 40.0).max(0.0);
         let mut area = egui::ScrollArea::horizontal()
             .id_salt("home_top_games")
-            .auto_shrink([false, false]);
+            .auto_shrink([false, false])
+            .max_width(viewport_width)
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
         if sliding {
             area = area.horizontal_scroll_offset(animated_offset);
         }
@@ -231,7 +235,12 @@ fn top_games_row(
         ui.ctx().data_mut(|data| {
             data.insert_temp(current_offset_id, output.state.offset.x);
         });
+        if sliding {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(16));
+        }
         let max_offset = (output.content_size.x - output.inner_rect.width()).max(0.0);
+        ui.add_space(6.0);
         let right = ui
             .allocate_ui_with_layout(
                 egui::vec2(40.0, TILE_SIZE.y),
