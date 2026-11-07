@@ -1,0 +1,78 @@
+name: Build and publish Windows release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Assign commit build version
+        id: version
+        shell: pwsh
+        run: |
+          $version = "0.1.$env:GITHUB_RUN_NUMBER"
+          $manifestPath = Join-Path $env:GITHUB_WORKSPACE "Cargo.toml"
+          $manifest = [IO.File]::ReadAllText($manifestPath)
+          $versionPattern = [regex]::new('(?m)^version\s*=\s*"[^"]+"\s*$')
+          $updated = $versionPattern.Replace($manifest, "version = `"$version`"", 1)
+          if ($updated -eq $manifest) { throw "Could not update package version in Cargo.toml" }
+          [IO.File]::WriteAllText($manifestPath, $updated, [Text.UTF8Encoding]::new($false))
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "APP_VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Build the Windows app
+        run: cargo build --release
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Stage app and create installer
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:GITHUB_WORKSPACE "dist\app"
+          New-Item -ItemType Directory -Force -Path (Join-Path $stage "Xvd") | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $stage "OnlineFix") | Out-Null
+          Copy-Item "target\release\universal-downloader.exe" $stage
+          Get-ChildItem "Xvd" -File | Where-Object { $_.Extension -ne ".pdb" } | Copy-Item -Destination (Join-Path $stage "Xvd")
+          Get-ChildItem "OnlineFix" -File | Copy-Item -Destination (Join-Path $stage "OnlineFix")
+          $compiler = Get-ChildItem "${env:ProgramFiles(x86)}\Inno Setup *\ISCC.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $compiler) { throw "Inno Setup compiler was not installed" }
+          & $compiler.FullName "/DAppVersion=$env:APP_VERSION" "installer\UniversalDownloader.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
+          $hash = (Get-FileHash "dist\UniversalDownloader-Setup.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText("dist\SHA256SUMS.txt", "$hash  UniversalDownloader-Setup.exe`n", [Text.Encoding]::ASCII)
+
+      - name: Publish this commit as a GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: Universal Downloader v${{ steps.version.outputs.version }}
+          body: |
+            Windows installer built from commit ${{ github.sha }}.
+
+            Download `UniversalDownloader-Setup.exe` and run it to install or update the app. `SHA256SUMS.txt` contains its SHA-256 checksum.
+          files: |
+            dist/UniversalDownloader-Setup.exe
+            dist/SHA256SUMS.txt
+          fail_on_unmatched_files: true

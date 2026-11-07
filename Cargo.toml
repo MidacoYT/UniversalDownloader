@@ -1,0 +1,19 @@
+[package]
+name = "universal-downloader"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = { version = "0.35", default-features = false, features = ["default_fonts", "glow"] }
+egui_extras = { version = "0.35", default-features = false, features = ["svg"] }
+fluent-egui = { version = "0.1.1", default-features = false, features = ["glow"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+serde_json = "1"
+sha2 = "0.10"
+webbrowser = "1"
+wry = "0.53"
+rfd = { version = "0.15", default-features = false, features = ["common-controls-v6"] }
+
+[build-dependencies]
+winres = "0.1.12"
