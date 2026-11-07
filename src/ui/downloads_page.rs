@@ -432,7 +432,7 @@ fn download_subtitle(entry: &Download, game: Option<&Game>) -> String {
 
 fn status_text(status: &DownloadStatus) -> RichText {
     match status {
-        DownloadStatus::Queued => widgets::muted("Queued", 11.0),
+        DownloadStatus::Queued => widgets::muted("Waiting in queue", 11.0),
         DownloadStatus::Downloading => RichText::new("Downloading in progress")
             .color(theme::ACCENT_LIGHT)
             .strong(),

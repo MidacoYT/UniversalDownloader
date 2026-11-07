@@ -3,6 +3,7 @@ use crate::model::Game;
 use reqwest::Url;
 use reqwest::blocking::Client;
 use reqwest::header::{CONTENT_LENGTH, CONTENT_RANGE, RANGE, USER_AGENT};
+use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::io::{BufRead, BufReader};
@@ -128,6 +129,7 @@ pub struct Download {
     pub registration: Option<Result<(), String>>,
     control: Arc<Control>,
     product_id: Option<String>,
+    epic_id: Option<String>,
     restored: bool,
 }
 
@@ -141,6 +143,79 @@ enum ControlState {
 struct Control {
     state: Mutex<ControlState>,
     changed: Condvar,
+}
+
+struct QueueState {
+    waiting: VecDeque<u64>,
+    active: usize,
+}
+
+struct DownloadQueue {
+    state: Mutex<QueueState>,
+    changed: Condvar,
+}
+
+struct QueuePermit(Arc<DownloadQueue>);
+
+impl DownloadQueue {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(QueueState {
+                waiting: VecDeque::new(),
+                active: 0,
+            }),
+            changed: Condvar::new(),
+        })
+    }
+
+    fn enqueue(&self, id: u64) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if !state.waiting.contains(&id) {
+            state.waiting.push_back(id);
+        }
+        self.changed.notify_all();
+    }
+
+    fn acquire(self: &Arc<Self>, id: u64, control: &Control) -> Option<QueuePermit> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            if control.get() == ControlState::Cancelled {
+                state.waiting.retain(|waiting| *waiting != id);
+                self.changed.notify_all();
+                return None;
+            }
+            if control.get() == ControlState::Paused {
+                state.waiting.retain(|waiting| *waiting != id);
+                self.changed.notify_all();
+                drop(state);
+                let _ = control.wait_until_resumed();
+                state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                if control.get() != ControlState::Cancelled && !state.waiting.contains(&id) {
+                    state.waiting.push_back(id);
+                }
+                self.changed.notify_all();
+                continue;
+            }
+            if state.active < 2 && state.waiting.front() == Some(&id) {
+                state.waiting.pop_front();
+                state.active += 1;
+                return Some(QueuePermit(Arc::clone(self)));
+            }
+            state = self
+                .changed
+                .wait_timeout(state, Duration::from_millis(200))
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
+}
+
+impl Drop for QueuePermit {
+    fn drop(&mut self) {
+        let mut state = self.0.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.active = state.active.saturating_sub(1);
+        self.0.changed.notify_all();
+    }
 }
 
 impl Control {
@@ -210,6 +285,8 @@ pub struct DownloadManager {
     /// Dernier contenu écrit dans le fichier d'état : évite de réécrire le disque à chaque
     /// événement de progression alors que la liste persistée n'a pas changé.
     last_persisted: Mutex<Vec<u8>>,
+    queue: Arc<DownloadQueue>,
+    library_needs_scan: bool,
 }
 
 impl DownloadManager {
@@ -222,12 +299,15 @@ impl DownloadManager {
             tx,
             rx,
             last_persisted: Mutex::new(Vec::new()),
+            queue: DownloadQueue::new(),
+            library_needs_scan: false,
         };
         manager.restore_xbox_downloads();
+        manager.resume_restored_downloads();
         manager
     }
 
-    fn persist_xbox_downloads(&self) {
+    fn persist_downloads(&self) {
         let Some(path) = download_state_path() else {
             return;
         };
@@ -236,9 +316,11 @@ impl DownloadManager {
             return;
         }
         let items: Vec<_> = self.entries.iter().filter_map(|entry| {
-            let product_id = entry.product_id.as_ref()?;
+            if entry.product_id.is_none() && entry.epic_id.is_none() {
+                return None;
+            }
             if !matches!(entry.status, DownloadStatus::Queued | DownloadStatus::Downloading | DownloadStatus::Paused | DownloadStatus::Extracting | DownloadStatus::Registering) { return None; }
-            Some(serde_json::json!({"id":entry.id,"product_id":product_id,"name":entry.name,"path":entry.path}))
+            Some(serde_json::json!({"id":entry.id,"product_id":entry.product_id,"epic_id":entry.epic_id,"name":entry.name,"path":entry.path}))
         }).collect();
         if let Ok(data) = serde_json::to_vec_pretty(&items) {
             let mut last = self
@@ -259,7 +341,7 @@ impl DownloadManager {
         let Ok(items) = serde_json::from_slice::<Vec<serde_json::Value>>(&data) else {
             return;
         };
-        for item in items {
+        for item in &items {
             let (Some(id), Some(product_id), Some(name), Some(destination)) = (
                 item.get("id").and_then(|v| v.as_u64()),
                 item.get("product_id").and_then(|v| v.as_str()),
@@ -300,8 +382,53 @@ impl DownloadManager {
                 registration: None,
                 control,
                 product_id: Some(product_id.to_owned()),
+                epic_id: None,
                 restored: true,
             });
+        }
+        for item in &items {
+            let (Some(id), Some(epic_id), Some(name), Some(root)) = (
+                item.get("id").and_then(|v| v.as_u64()),
+                item.get("epic_id").and_then(|v| v.as_str()),
+                item.get("name").and_then(|v| v.as_str()),
+                item.get("path").and_then(|v| v.as_str()),
+            ) else {
+                continue;
+            };
+            let root = PathBuf::from(root);
+            if !root.is_absolute() || !root.is_dir() {
+                continue;
+            }
+            let control = Arc::new(Control::new());
+            control.set(ControlState::Paused);
+            self.next_id = self.next_id.max(id.saturating_add(1));
+            self.entries.push(Download {
+                id,
+                name: name.to_owned(),
+                path: root,
+                received: 0,
+                total: 0,
+                speed: 0,
+                status: DownloadStatus::Paused,
+                downloaded_size: 0,
+                registration: None,
+                control,
+                product_id: None,
+                epic_id: Some(epic_id.to_owned()),
+                restored: true,
+            });
+        }
+    }
+
+    fn resume_restored_downloads(&mut self) {
+        let ids: Vec<u64> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.restored && entry.product_id.is_some())
+            .map(|entry| entry.id)
+            .collect();
+        for id in ids {
+            self.resume(id);
         }
     }
 
@@ -378,22 +505,32 @@ impl DownloadManager {
             registration: None,
             control: Arc::clone(&control),
             product_id: None,
+            epic_id: None,
             restored: false,
         };
         self.entries.push(entry);
-        self.persist_xbox_downloads();
+        self.persist_downloads();
         self.notice.clear();
 
         let tx = self.tx.clone();
+        let queue = Arc::clone(&self.queue);
+        queue.enqueue(id);
         let url = url.to_string();
         std::thread::spawn(move || {
-            let result = transfer(&url, false, &path, &partial_path, id, &control, &tx);
+            let result = if let Some(_permit) = queue.acquire(id, &control) {
+                transfer(&url, false, &path, &partial_path, id, &control, &tx)
+            } else {
+                Err("cancelled".to_owned())
+            };
             let result = match result {
                 Ok(true) => Ok(()),
                 Ok(false) => Err("cancelled".to_owned()),
                 Err(_) if control.get() == ControlState::Cancelled => {
                     match remove_partial(&partial_path) {
-                        Ok(()) => Err("cancelled".to_owned()),
+                        Ok(()) => {
+                            let _ = fs::remove_file(&path);
+                            Err("cancelled".to_owned())
+                        }
                         Err(error) => Err(format!("Could not remove partial download: {error}")),
                     }
                 }
@@ -460,11 +597,14 @@ impl DownloadManager {
             registration: None,
             control: Arc::clone(&control),
             product_id: Some(product_id.to_owned()),
+            epic_id: None,
             restored: false,
         });
-        self.persist_xbox_downloads();
+        self.persist_downloads();
         self.notice.clear();
         let tx = self.tx.clone();
+        let queue = Arc::clone(&self.queue);
+        queue.enqueue(id);
         let product_id = product_id.to_owned();
         let game_dir = destination.parent().unwrap().to_path_buf();
         download_log(format!(
@@ -472,15 +612,25 @@ impl DownloadManager {
             game_dir.display()
         ));
         std::thread::spawn(move || {
-            run_xbox_download(
-                id,
-                product_id,
-                destination,
-                game_dir,
-                partial_path,
-                control,
-                tx,
-            )
+            if let Some(_permit) = queue.acquire(id, &control) {
+                run_xbox_download(
+                    id,
+                    product_id,
+                    destination,
+                    game_dir,
+                    partial_path,
+                    control,
+                    tx,
+                );
+            } else {
+                let _ = remove_partial(&partial_path);
+                let _ = fs::remove_file(&destination);
+                let _ = fs::remove_dir_all(&game_dir);
+                let _ = tx.send(DownloadEvent::Finished {
+                    id,
+                    result: Err("cancelled".into()),
+                });
+            }
         });
         Ok(())
     }
@@ -516,13 +666,20 @@ impl DownloadManager {
             registration: None,
             control: Arc::clone(&control),
             product_id: None,
+            epic_id: Some(game.id.clone()),
             restored: false,
         });
         self.notice.clear();
         let tx = self.tx.clone();
+        let queue = Arc::clone(&self.queue);
+        queue.enqueue(id);
         let game = game.clone();
         std::thread::spawn(move || {
-            let result = run_epic_download(id, game, game_dir.clone(), control, tx.clone());
+            let result = if let Some(_permit) = queue.acquire(id, &control) {
+                run_epic_download(id, game, game_dir.clone(), control, tx.clone())
+            } else {
+                Err("cancelled".into())
+            };
             if result.is_err() {
                 let _ = fs::remove_dir_all(&game_dir);
             }
@@ -544,7 +701,7 @@ impl DownloadManager {
                 entry.status = DownloadStatus::Paused;
             }
         }
-        self.persist_xbox_downloads();
+        self.persist_downloads();
     }
 
     pub fn resume(&mut self, id: u64) {
@@ -563,13 +720,26 @@ impl DownloadManager {
             let partial = partial_path(&destination);
             let control = Arc::clone(&entry.control);
             entry.restored = false;
-            entry.status = DownloadStatus::Downloading;
+            entry.control.set(ControlState::Running);
+            entry.status = DownloadStatus::Queued;
             let tx = self.tx.clone();
             let id = entry.id;
+            let queue = Arc::clone(&self.queue);
+            queue.enqueue(id);
             std::thread::spawn(move || {
-                run_xbox_download(id, product_id, destination, game_dir, partial, control, tx)
+                if let Some(_permit) = queue.acquire(id, &control) {
+                    run_xbox_download(id, product_id, destination, game_dir, partial, control, tx);
+                } else {
+                    let _ = remove_partial(&partial);
+                    let _ = fs::remove_file(&destination);
+                    let _ = fs::remove_dir_all(&game_dir);
+                    let _ = tx.send(DownloadEvent::Finished {
+                        id,
+                        result: Err("cancelled".into()),
+                    });
+                }
             });
-            self.persist_xbox_downloads();
+            self.persist_downloads();
             return;
         }
         if let Some(entry) = self.entries.iter_mut().find(|item| item.id == id) {
@@ -578,7 +748,46 @@ impl DownloadManager {
                 entry.status = DownloadStatus::Downloading;
             }
         }
-        self.persist_xbox_downloads();
+        self.persist_downloads();
+    }
+
+    pub fn resume_restored_epic(&mut self, games: &[Game]) {
+        let resumable: Vec<(u64, Game)> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.restored && entry.epic_id.is_some())
+            .filter_map(|entry| {
+                let game = games
+                    .iter()
+                    .find(|game| Some(&game.id) == entry.epic_id.as_ref())?;
+                Some((entry.id, game.clone()))
+            })
+            .collect();
+        for (id, game) in resumable {
+            let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) else {
+                continue;
+            };
+            entry.restored = false;
+            entry.control.set(ControlState::Running);
+            entry.status = DownloadStatus::Queued;
+            let control = Arc::clone(&entry.control);
+            let root = entry.path.clone();
+            let tx = self.tx.clone();
+            let queue = Arc::clone(&self.queue);
+            queue.enqueue(id);
+            std::thread::spawn(move || {
+                let result = if let Some(_permit) = queue.acquire(id, &control) {
+                    run_epic_download(id, game, root.clone(), control, tx.clone())
+                } else {
+                    Err("cancelled".into())
+                };
+                if result.is_err() {
+                    let _ = fs::remove_dir_all(&root);
+                }
+                let _ = tx.send(DownloadEvent::Finished { id, result });
+            });
+        }
+        self.persist_downloads();
     }
 
     pub fn cancel(&mut self, id: u64) {
@@ -595,7 +804,7 @@ impl DownloadManager {
                 entry.status = DownloadStatus::Cancelled;
             }
         }
-        self.persist_xbox_downloads();
+        self.persist_downloads();
     }
 
     pub fn poll(&mut self) -> bool {
@@ -631,6 +840,9 @@ impl DownloadManager {
                 Ok(DownloadEvent::Finished { id, result }) => {
                     if let Some(entry) = self.entries.iter_mut().find(|item| item.id == id) {
                         entry.speed = 0;
+                        if matches!(result, Err(ref error) if error.starts_with("cancelled")) {
+                            self.library_needs_scan = true;
+                        }
                         entry.status = match result {
                             Ok(()) => {
                                 entry.received = entry.total.max(entry.received);
@@ -692,9 +904,26 @@ impl DownloadManager {
             }
         }
         if changed {
-            self.persist_xbox_downloads();
+            self.persist_downloads();
         }
+        changed |= self.prune_missing_completed();
         changed
+    }
+
+    fn prune_missing_completed(&mut self) -> bool {
+        let count = self.entries.len();
+        self.entries.retain(|entry| {
+            if entry.status != DownloadStatus::Completed {
+                return true;
+            }
+            let installed_path = if entry.product_id.is_some() {
+                entry.path.parent().unwrap_or(&entry.path)
+            } else {
+                &entry.path
+            };
+            installed_path.exists()
+        });
+        self.entries.len() != count
     }
 
     pub fn is_active(&self) -> bool {
@@ -708,6 +937,10 @@ impl DownloadManager {
                     | DownloadStatus::Registering
             )
         })
+    }
+
+    pub fn take_library_change(&mut self) -> bool {
+        std::mem::take(&mut self.library_needs_scan)
     }
 }
 
@@ -1180,46 +1413,44 @@ fn run_xbox_download(
     control: Arc<Control>,
     tx: mpsc::Sender<DownloadEvent>,
 ) {
-    let result = match resolve_xbox_package(&product_id) {
-        Ok((url, expected_size)) => {
-            let transfer_result = if destination.is_file() {
-                Ok(true)
-            } else {
-                transfer(&url, true, &destination, &partial_path, id, &control, &tx)
-            };
-            if let Ok(true) = transfer_result {
-                if expected_size > 0
-                    && fs::metadata(&destination).map(|m| m.len()).unwrap_or(0) != expected_size
-                {
-                    Err(format!(
-                        "Downloaded package size differs from Microsoft metadata ({expected_size} bytes)."
-                    ))
-                } else {
-                    let package_bytes = fs::metadata(&destination).map(|m| m.len()).unwrap_or(0);
-                    let _ = tx.send(DownloadEvent::Extracting { id, package_bytes });
-                    match extract_msixvc(
-                        &destination,
-                        &game_dir,
-                        &product_id,
-                        package_bytes,
-                        &control,
-                        &tx,
-                        id,
-                    ) {
-                        Ok(true) => {
-                            let _ = fs::remove_file(&destination);
-                            register_extracted_package(&game_dir, &control, &tx, id)
-                        }
-                        Ok(false) => Ok(false),
-                        Err(error) => Err(error),
-                    }
-                }
-            } else {
-                transfer_result
+    let result = (|| {
+        let expected_size = if destination.is_file() {
+            0
+        } else {
+            let (url, expected_size) = resolve_xbox_package(&product_id)?;
+            if !transfer(&url, true, &destination, &partial_path, id, &control, &tx)? {
+                return Ok(false);
             }
+            expected_size
+        };
+        if expected_size > 0
+            && fs::metadata(&destination).map(|m| m.len()).unwrap_or(0) != expected_size
+        {
+            return Err(format!(
+                "Downloaded package size differs from Microsoft metadata ({expected_size} bytes)."
+            ));
         }
-        Err(error) => Err(error),
-    };
+        let package_bytes = fs::metadata(&destination).map(|m| m.len()).unwrap_or(0);
+        let _ = tx.send(DownloadEvent::Extracting { id, package_bytes });
+        match extract_msixvc(
+            &destination,
+            &game_dir,
+            &product_id,
+            package_bytes,
+            &control,
+            &tx,
+            id,
+        )? {
+            true => {
+                let registered = register_extracted_package(&game_dir, &control, &tx, id);
+                if matches!(registered, Ok(true)) {
+                    let _ = fs::remove_file(&destination);
+                }
+                registered
+            }
+            false => Ok(false),
+        }
+    })();
     if let Err(error) = &result {
         download_log(format!(
             "Xbox download failed for product_id={product_id}: {error}"
@@ -1231,7 +1462,17 @@ fn run_xbox_download(
     }
     let result = match result {
         Ok(true) => Ok(()),
-        Ok(false) => Err("cancelled".to_owned()),
+        Ok(false) => {
+            let partial_cleanup = remove_partial(&partial_path);
+            let _ = fs::remove_file(&destination);
+            let _ = fs::remove_dir_all(&game_dir);
+            match partial_cleanup {
+                Ok(()) => Err("cancelled".to_owned()),
+                Err(error) => Err(format!(
+                    "cancelled; could not remove partial package: {error}"
+                )),
+            }
+        }
         Err(_error) if control.get() == ControlState::Paused => {
             download_log(format!(
                 "Xbox task {id} interrupted while paused; keeping partial data"

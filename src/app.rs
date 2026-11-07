@@ -90,6 +90,10 @@ impl App {
         self.images.poll(ctx);
         let catalog_changed = self.catalog.poll();
         let epic_catalog_changed = self.epic_catalog.poll();
+        if !self.epic_catalog.is_loading() {
+            self.downloads
+                .resume_restored_epic(&self.epic_catalog.games);
+        }
         let epic_stats_updates: Vec<_> = self.epic_stats_rx.try_iter().collect();
         let epic_stats_changed = !epic_stats_updates.is_empty();
         if epic_stats_changed {
@@ -118,13 +122,14 @@ impl App {
             .filter(|entry| entry.status == crate::downloads::DownloadStatus::Completed)
             .count();
         self.downloads.poll();
+        let download_changed_library = self.downloads.take_library_change();
         let completed_after = self
             .downloads
             .entries
             .iter()
             .filter(|entry| entry.status == crate::downloads::DownloadStatus::Completed)
             .count();
-        if completed_after > completed_before {
+        if completed_after > completed_before || download_changed_library {
             self.scan_library();
         }
         if catalog_changed || epic_catalog_changed || library_changed {
@@ -139,6 +144,13 @@ impl App {
             || self.downloads.is_active()
         {
             ctx.request_repaint_after(Duration::from_millis(100));
+        } else if self
+            .downloads
+            .entries
+            .iter()
+            .any(|entry| entry.status == crate::downloads::DownloadStatus::Completed)
+        {
+            ctx.request_repaint_after(Duration::from_secs(2));
         }
     }
 

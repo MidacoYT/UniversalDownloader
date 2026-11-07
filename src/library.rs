@@ -375,22 +375,28 @@ $icon = $target
 "#
         }
         crate::model::GameStore::Xbox => {
-            command.env("UD_SHORTCUT_FOLDER", folder);
+            command
+                .env("UD_SHORTCUT_FOLDER", folder)
+                .env("UD_SHORTCUT_EXECUTABLE", preferred_exe.unwrap_or_default());
             r#"
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath($env:UD_SHORTCUT_FOLDER).TrimEnd('\')
-$package = Get-AppxPackage | Where-Object {
-    if (-not $_.InstallLocation) { return $false }
-    $location = [IO.Path]::GetFullPath($_.InstallLocation).TrimEnd('\')
-    $location.Equals($root, [StringComparison]::OrdinalIgnoreCase) -or
-        $location.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)
-} | Select-Object -First 1
-if (-not $package) { throw 'No registered Xbox game package was found in this folder.' }
-$manifest = Get-AppxPackageManifest -Package $package.PackageFullName
-$application = @($manifest.Package.Applications.Application) | Select-Object -First 1
-if (-not $application -or -not $application.Id) { throw 'The Xbox package has no launchable application.' }
+$manifestPath = Join-Path $root 'appxmanifest.xml'
+if (-not (Test-Path -LiteralPath $manifestPath)) { throw 'appxmanifest.xml was not found in the Xbox game folder.' }
+[xml]$manifest = Get-Content -LiteralPath $manifestPath -Raw
+$identity = $manifest.SelectSingleNode("//*[local-name()='Identity']")
+if (-not $identity) { throw 'The Xbox app manifest has no package identity.' }
+$package = Get-AppxPackage -Name $identity.GetAttribute('Name') | Select-Object -First 1
+if (-not $package) { throw 'No registered Xbox package matches this game manifest.' }
+$applications = @($manifest.SelectNodes("//*[local-name()='Application']"))
+if ($env:UD_SHORTCUT_EXECUTABLE) {
+    $preferred = [IO.Path]::GetFileName($env:UD_SHORTCUT_EXECUTABLE)
+    $application = $applications | Where-Object { [IO.Path]::GetFileName($_.GetAttribute('Executable')) -ieq $preferred } | Select-Object -First 1
+}
+if (-not $application) { $application = $applications | Select-Object -First 1 }
+if (-not $application -or -not $application.GetAttribute('Id')) { throw 'The Xbox package has no launchable application.' }
 $target = Join-Path $env:WINDIR 'explorer.exe'
-$arguments = 'shell:AppsFolder\' + $package.PackageFamilyName + '!' + $application.Id
+$arguments = 'shell:AppsFolder\' + $package.PackageFamilyName + '!' + $application.GetAttribute('Id')
 $workdir = $root
 $icon = $target
 "#
