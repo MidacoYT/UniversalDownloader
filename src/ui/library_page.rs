@@ -8,7 +8,7 @@ use crate::util::{GIB, open_folder};
 use eframe::egui::{self, Color32, RichText};
 use fluent_egui::winui::prelude::*;
 
-const COVER_HEIGHT: f32 = 112.0;
+const COVER_HEIGHT: f32 = 148.0;
 
 pub fn show(
     ui: &mut egui::Ui,
@@ -144,27 +144,43 @@ fn entry_card(
     }
     let cover = row.game.and_then(|g| images.get(&g.id));
     let title = row.title();
-    let subtitle = format!(
-        "{:.1} GB · {}",
-        row.entry.bytes as f64 / GIB,
-        row.entry.path.display()
-    );
+    let subtitle = row.entry.path.display().to_string();
 
     column.winui(|column| {
-        column.card(title, subtitle, |card| {
+        egui::Frame::new()
+            .fill(theme::BG_CARD)
+            .stroke(egui::Stroke::new(1.0, theme::accent_alpha(45)))
+            .corner_radius(14)
+            .inner_margin(egui::Margin::same(0))
+            .show(column, |card| {
+            card.set_min_width(card.available_width());
+            card.spacing_mut().item_spacing.y = 0.0;
             if grid {
                 cover_image(card, cover, title);
-                card.add_space(8.0);
             }
-            if let Some(game) = row.game {
-                let publisher = if game.publisher.is_empty() {
-                    "Xbox"
-                } else {
-                    &game.publisher
-                };
-                card.label(format!("Found in catalog · {publisher}"));
-            }
-            card.horizontal(|ui| buttons(ui, row, out));
+            egui::Frame::new()
+                .inner_margin(egui::Margin::symmetric(12, 10))
+                .show(card, |body| {
+                    body.set_min_width(body.available_width());
+                    body.add_sized(
+                        [body.available_width(), 24.0],
+                        egui::Label::new(RichText::new(title).size(16.0).strong()).truncate(),
+                    );
+                    let publisher = row.game.map(|game| game.publisher.as_str()).filter(|v| !v.is_empty()).unwrap_or("Installed game");
+                    body.label(widgets::muted(publisher, 12.0));
+                    body.add_space(7.0);
+                    body.horizontal(|meta| {
+                        meta.add(icons::storage(13.0));
+                        meta.label(widgets::muted(format!("{:.1} GB", row.entry.bytes as f64 / GIB), 11.0));
+                    });
+                    body.add_space(3.0);
+                    body.horizontal(|meta| {
+                        meta.add(icons::folder(13.0));
+                        meta.add(egui::Label::new(widgets::muted(subtitle, 10.0)).truncate());
+                    });
+                    body.add_space(9.0);
+                    body.horizontal(|ui| buttons(ui, row, out));
+                });
         });
     });
 }

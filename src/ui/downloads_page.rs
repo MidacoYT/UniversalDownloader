@@ -11,6 +11,7 @@ use fluent_egui::winui::prelude::*;
 pub fn show(
     ui: &mut egui::Ui,
     catalog: &Catalog,
+    epic_catalog: &Catalog,
     images: &mut ImageCache,
     downloads: &mut DownloadManager,
 ) {
@@ -39,8 +40,8 @@ pub fn show(
                 ui.label(RichText::new(&downloads.notice).color(theme::DANGER));
             }
             ui.add_space(18.0);
-            active_section(ui, catalog, images, downloads);
-            completed_section(ui, catalog, images, downloads);
+            active_section(ui, catalog, epic_catalog, images, downloads);
+            completed_section(ui, catalog, epic_catalog, images, downloads);
             failed_section(ui, downloads);
         });
 }
@@ -48,6 +49,7 @@ pub fn show(
 fn active_section(
     ui: &mut egui::Ui,
     catalog: &Catalog,
+    epic_catalog: &Catalog,
     images: &mut ImageCache,
     downloads: &mut DownloadManager,
 ) {
@@ -98,7 +100,7 @@ fn active_section(
         .rev()
         .filter(|entry| is_active(&entry.status))
     {
-        download_card(ui, entry, catalog, images, &mut actions);
+        download_card(ui, entry, catalog, epic_catalog, images, &mut actions);
         ui.add_space(10.0);
     }
     for (id, action) in actions {
@@ -114,12 +116,14 @@ fn download_card(
     ui: &mut egui::Ui,
     entry: &Download,
     catalog: &Catalog,
+    epic_catalog: &Catalog,
     images: &mut ImageCache,
     actions: &mut Vec<(u64, DownloadAction)>,
 ) {
     let game = catalog
         .games
         .iter()
+        .chain(epic_catalog.games.iter())
         .find(|game| game.name.eq_ignore_ascii_case(&entry.name));
     ui.winui(|ui| {
         egui::Frame::new()
@@ -129,15 +133,11 @@ fn download_card(
             .inner_margin(egui::Margin::same(16))
             .show(ui, |card| {
                 card.set_min_width(card.available_width());
-                card.label(RichText::new(&entry.name).size(16.0).strong());
-                card.label(widgets::muted(download_subtitle(entry, game), 13.0));
-                card.add_space(8.0);
                 card.horizontal(|row| {
                     if let Some(game) = game {
-                        cover(row, game, images);
+                        cover(row, game, images, (76.0, 76.0));
                     } else {
-                        let (rect, _) =
-                            row.allocate_exact_size(egui::vec2(60.0, 60.0), egui::Sense::hover());
+                        let (rect, _) = row.allocate_exact_size(egui::vec2(76.0, 76.0), egui::Sense::hover());
                         row.painter()
                             .rect_filled(rect, 10.0, theme::accent_alpha(45));
                         row.painter().text(
@@ -150,7 +150,12 @@ fn download_card(
                     }
 
                     row.vertical(|details| {
+                        details.set_min_width(details.available_width());
+                        details.label(RichText::new(&entry.name).size(17.0).strong());
+                        details.label(widgets::muted(download_subtitle(entry, game), 12.0));
+                        details.add_space(5.0);
                         details.horizontal(|line| {
+                            line.add(icons::download(13.0));
                             line.label(status_text(&entry.status));
                             if entry.total > 0 {
                                 line.label(widgets::muted(
@@ -275,6 +280,7 @@ fn download_card(
 fn completed_section(
     ui: &mut egui::Ui,
     catalog: &Catalog,
+    epic_catalog: &Catalog,
     images: &mut ImageCache,
     downloads: &DownloadManager,
 ) {
@@ -300,12 +306,19 @@ fn completed_section(
         let game = catalog
             .games
             .iter()
+            .chain(epic_catalog.games.iter())
             .find(|game| game.name.eq_ignore_ascii_case(&entry.name));
         ui.winui(|ui| {
-            ui.card(&entry.name, &download_subtitle(entry, game), |card| {
+            egui::Frame::new()
+                .fill(theme::BG_CARD)
+                .stroke(egui::Stroke::new(1.0, theme::accent_alpha(45)))
+                .corner_radius(12)
+                .inner_margin(egui::Margin::same(14))
+                .show(ui, |card| {
+                card.set_min_width(card.available_width());
                 card.horizontal(|row| {
                     if let Some(game) = game {
-                        cover(row, game, images);
+                        cover(row, game, images, (60.0, 60.0));
                     } else {
                         let (rect, _) =
                             row.allocate_exact_size(egui::vec2(44.0, 44.0), egui::Sense::hover());
@@ -320,6 +333,8 @@ fn completed_section(
                         );
                     }
                     row.vertical(|details| {
+                        details.label(RichText::new(&entry.name).size(15.0).strong());
+                        details.label(widgets::muted(download_subtitle(entry, game), 11.0));
                         details.label(
                             RichText::new(format!(
                                 "Downloaded · {}",
@@ -351,7 +366,7 @@ fn completed_section(
                             }
                             None => {}
                         }
-                        if details.button("Open folder").clicked()
+                        if details.add(egui::Button::image_and_text(icons::folder_check(13.0), "Open folder")).clicked()
                             && let Some(parent) = entry.path.parent()
                         {
                             open_folder(parent);
@@ -392,9 +407,9 @@ fn failed_section(ui: &mut egui::Ui, downloads: &DownloadManager) {
     }
 }
 
-fn cover(ui: &mut egui::Ui, game: &Game, images: &mut ImageCache) {
+fn cover(ui: &mut egui::Ui, game: &Game, images: &mut ImageCache, size: (f32, f32)) {
     images.request(ui.ctx(), &game.id, &game.image, (120, 120));
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(60.0, 60.0), egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(size.0, size.1), egui::Sense::hover());
     match images.get(&game.id) {
         Some(texture) => images::paint_cover(ui, texture, rect, egui::CornerRadius::same(10), 1.0),
         None => {

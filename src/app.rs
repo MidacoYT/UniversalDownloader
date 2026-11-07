@@ -345,7 +345,13 @@ impl App {
                 out,
             ),
             Page::Downloads => {
-                downloads_page::show(ui, &self.catalog, &mut self.images, &mut self.downloads)
+                downloads_page::show(
+                    ui,
+                    &self.catalog,
+                    &self.epic_catalog,
+                    &mut self.images,
+                    &mut self.downloads,
+                )
             }
             Page::Updates => updates_page::show(ui, &self.library, &mut self.updates),
             Page::Settings => settings_page::show(ui, &mut self.settings),
