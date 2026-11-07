@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resolve Epic CDN chunk URLs for the local EpicApi manifest catalogue.
+"""Resolve Epic CDN chunk URLs for local BuildPatch manifests.
 
 The script asks for an Epic authorizationCode, exchanges it for a short-lived
 access token, then reads BuildPatch manifests itself. It never invokes Legendary
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import csv
 import difflib
 import hashlib
 import json
@@ -412,10 +413,27 @@ def split_cloud_dir(base_url: str) -> dict[str, str | None]:
     }
 
 
+def load_manifest_index(path: Path) -> dict[str, dict[str, str]]:
+    """Read the optional CSV emitted by export_epic_manifests.py."""
+    if not path.is_file():
+        return {}
+    result = {}
+    with path.open("r", encoding="utf-8-sig", newline="") as source:
+        for row in csv.DictReader(source):
+            filename = Path(row.get("file", "")).name
+            if filename:
+                result[filename.casefold()] = row
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--games-json", type=Path, default=Path(r"D:\EpicApi\functions\data\games.json"))
-    parser.add_argument("--manifest-dir", type=Path, default=Path(r"D:\EpicApi\public\manifests"))
+    parser.add_argument("--manifest-dir", type=Path, default=Path("Epic_Manifests"))
+    parser.add_argument(
+        "--manifest-index",
+        type=Path,
+        help="Optional _resultats.csv emitted by export_epic_manifests.py (defaults to <manifest-dir>/_resultats.csv).",
+    )
     parser.add_argument("--output", type=Path, default=Path("epic_chunk_urls"))
     program_data = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData"))
     parser.add_argument(
@@ -424,8 +442,12 @@ def main() -> int:
         default=program_data / "Epic" / "EpicGamesLauncher" / "Data" / "Catalog" / "catcache.bin",
     )
     args = parser.parse_args()
-    if not args.games_json.is_file():
-        print(f"Missing catalogue file: {args.games_json}", file=sys.stderr)
+    if not args.manifest_dir.is_dir():
+        print(f"Missing manifest directory: {args.manifest_dir}", file=sys.stderr)
+        return 2
+    manifests = sorted(args.manifest_dir.glob("*.manifest"), key=lambda path: path.name.casefold())
+    if not manifests:
+        print(f"No .manifest files found in {args.manifest_dir}", file=sys.stderr)
         return 2
 
     try:
@@ -436,7 +458,8 @@ def main() -> int:
             print("No authorization code was entered.", file=sys.stderr)
             return 2
         token = exchange_authorization_code(code, grant_type)
-        games = json.loads(args.games_json.read_text(encoding="utf-8"))
+        index_path = args.manifest_index or (args.manifest_dir / "_resultats.csv")
+        manifest_index = load_manifest_index(index_path)
         asset_map, title_assets = load_asset_map(token)
         local_catalog = load_catalog_cache(args.catalog_cache)
         args.output.mkdir(parents=True, exist_ok=True)
@@ -452,22 +475,21 @@ def main() -> int:
             for item in old_summary
             if isinstance(item, dict) and item.get("appName")
         }
-        for game in games:
-            app_name = str(game.get("appName", ""))
-            manifest_name = str(game.get("manifest", ""))
-            manifest_path = args.manifest_dir / manifest_name
-            if not app_name or not manifest_path.is_file():
-                print(f"Skip {game.get('name', app_name)}: local manifest missing", file=sys.stderr)
-                continue
+        summary_order = []
+        for manifest_path in manifests:
+            metadata = manifest_index.get(manifest_path.name.casefold(), {})
+            app_name = str(metadata.get("app_name", "")).strip()
+            title = str(metadata.get("game", "")).strip() or manifest_path.stem
             try:
                 candidates = []
-                direct_asset = asset_map.get(app_name.casefold())
-                if direct_asset:
-                    candidates.append(direct_asset)
-                title_asset = match_title_asset(str(game.get("name", "")), title_assets)
+                if app_name:
+                    direct_asset = asset_map.get(app_name.casefold())
+                    if direct_asset:
+                        candidates.append(direct_asset)
+                title_asset = match_title_asset(title, title_assets)
                 if title_asset:
                     candidates.append(title_asset)
-                cache_asset = catalog_cache_match(app_name, str(game.get("name", "")), local_catalog)
+                cache_asset = catalog_cache_match(app_name, title, local_catalog) if app_name else None
                 if cache_asset:
                     for release_app_name in cache_asset.get("release_app_names", "").split("|"):
                         if release_app_name:
@@ -505,15 +527,16 @@ def main() -> int:
                 if asset is None or bases is None:
                     details = " | ".join(resolver_errors)
                     raise RuntimeError(details or "Epic returned no CDN metadata")
-                resolved_app_name = asset.get("app_name", app_name)
+                resolved_app_name = asset.get("app_name", app_name or manifest_path.stem)
+                output_app_name = app_name or resolved_app_name
                 urls = [f"{base}/{chunk['path']}" for chunk in chunks for base in bases]
                 filename = f"{manifest_path.stem}.txt"
                 (args.output / filename).write_text("\n".join(urls) + "\n", encoding="utf-8")
                 cloud = split_cloud_dir(bases[0])
                 chunks_filename = f"{manifest_path.stem}.json"
                 chunk_data = {
-                    "name": game.get("name", manifest_path.stem),
-                    "appName": app_name,
+                    "name": title,
+                    "appName": output_app_name,
                     "epicAppName": resolved_app_name,
                     "namespace": asset["namespace"],
                     "catalogItemId": asset["catalog_item_id"],
@@ -530,9 +553,9 @@ def main() -> int:
                     json.dumps(chunk_data, separators=(",", ":"), ensure_ascii=False) + "\n",
                     encoding="utf-8",
                 )
-                summary_by_app[app_name] = {
-                    "name": game.get("name", manifest_path.stem),
-                    "appName": app_name,
+                summary_by_app[output_app_name] = {
+                    "name": title,
+                    "appName": output_app_name,
                     "metadataSource": asset.get("source"),
                     "catalogTitle": asset.get("catalog_title"),
                     "manifestVersion": feature_level,
@@ -543,17 +566,14 @@ def main() -> int:
                     "urlFile": filename,
                     "chunkDataFile": f"chunks/{chunks_filename}",
                 }
+                summary_order.append(output_app_name)
                 print(
-                    f"{game.get('name', app_name)}: {len(chunks)} chunks, {len(bases)} CDN(s) "
+                    f"{title}: {len(chunks)} chunks, {len(bases)} CDN(s) "
                     f"(metadata source={asset.get('source')}, Epic appName={resolved_app_name})"
                 )
             except Exception as exc:
-                print(f"Skip {game.get('name', app_name)}: {exc}", file=sys.stderr)
-        ordered_summary = []
-        for game in games:
-            item = summary_by_app.pop(str(game.get("appName", "")), None)
-            if item:
-                ordered_summary.append(item)
+                print(f"Skip {title}: {exc}", file=sys.stderr)
+        ordered_summary = [summary_by_app.pop(key) for key in summary_order if key in summary_by_app]
         ordered_summary.extend(summary_by_app.values())
         summary_path.write_text(json.dumps(ordered_summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         print(f"Wrote results to {args.output.resolve()}")
