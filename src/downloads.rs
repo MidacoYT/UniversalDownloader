@@ -1718,7 +1718,7 @@ fn extract_msixvc(
             executable.display()
         ));
     }
-    let cik = fetch_cik(product_id)?;
+    let cik_url = fetch_cik_url(product_id)?;
     let mut command = Command::new(&executable);
     command
         .current_dir(&tool_dir)
@@ -1730,8 +1730,11 @@ fn extract_msixvc(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     hide_child_console(&mut command);
-    if let Some(path) = cik.as_deref() {
-        command.arg("-c").arg(path);
+    if let Some(url) = cik_url {
+        command
+            .arg("--cik-url")
+            .arg(url.as_str())
+            .env("UD_CIK_AUTH_TOKEN", crate::net::API_KEY);
     }
     let mut child = command.spawn().map_err(|e| {
         format!("Could not start XvdTool: {e}. Check that the .NET 8 runtime is installed.")
@@ -1825,8 +1828,7 @@ fn extract_msixvc(
     }
 }
 
-fn fetch_cik(product_id: &str) -> Result<Option<PathBuf>, String> {
-    const API_KEY: &str = crate::net::API_KEY;
+fn fetch_cik_url(product_id: &str) -> Result<Option<Url>, String> {
     let client = Client::builder()
         .timeout(Duration::from_secs(30))
         .user_agent(crate::net::USER_AGENT)
@@ -1834,7 +1836,7 @@ fn fetch_cik(product_id: &str) -> Result<Option<PathBuf>, String> {
         .map_err(|e| e.to_string())?;
     let mapping = client
         .get(format!("https://xboxapi.netlify.app/mapping/{product_id}"))
-        .bearer_auth(API_KEY)
+        .bearer_auth(crate::net::API_KEY)
         .send()
         .and_then(|r| r.error_for_status())
         .and_then(|r| r.json::<serde_json::Value>())
@@ -1842,69 +1844,23 @@ fn fetch_cik(product_id: &str) -> Result<Option<PathBuf>, String> {
     let Some(guid) = mapping.get("cik").and_then(|v| v.as_str()) else {
         return Ok(None);
     };
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("UniversalDownloader")
-        .join("Cik");
-    fs::create_dir_all(&base).map_err(|e| format!("Could not create the key cache: {e}"))?;
-    let path = base.join(format!("{guid}.cik"));
-    if fs::metadata(&path).is_ok_and(|m| m.len() == 48) {
-        return Ok(Some(path));
+    let valid_guid = guid.len() == 36
+        && guid.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        });
+    if !valid_guid {
+        return Err("XboxApi returned an invalid CIK identifier.".into());
     }
-    let response = client
-        .get(format!("https://xboxapi.netlify.app/cik/{guid}"))
-        .bearer_auth(API_KEY)
-        .send()
-        .and_then(|r| r.error_for_status())
-        .map_err(|e| format!("Could not download the package decryption key: {e}"))?;
-    let bytes = response.bytes().map_err(|e| e.to_string())?;
-    let decoded = if bytes.first() == Some(&b'{') {
-        let wrapper: serde_json::Value =
-            serde_json::from_slice(&bytes).map_err(|e| format!("Invalid key response: {e}"))?;
-        let body = wrapper
-            .get("body")
-            .and_then(|v| v.as_str())
-            .ok_or("Key response did not include key data.")?;
-        decode_base64(body)?
-    } else {
-        bytes.to_vec()
-    };
-    if decoded.len() != 48 {
-        return Err(format!(
-            "Package key has an unexpected size ({} bytes).",
-            decoded.len()
-        ));
-    }
-    fs::write(&path, decoded).map_err(|e| format!("Could not cache the package key: {e}"))?;
-    Ok(Some(path))
-}
-
-fn decode_base64(value: &str) -> Result<Vec<u8>, String> {
-    let mut output = Vec::with_capacity(value.len() * 3 / 4);
-    let mut accumulator = 0u32;
-    let mut bits = 0u8;
-    for byte in value.bytes().filter(|byte| !byte.is_ascii_whitespace()) {
-        if byte == b'=' {
-            break;
-        }
-        let digit = match byte {
-            b'A'..=b'Z' => byte - b'A',
-            b'a'..=b'z' => byte - b'a' + 26,
-            b'0'..=b'9' => byte - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            _ => return Err("Invalid encoded key: unexpected base64 character.".into()),
-        };
-        accumulator = (accumulator << 6) | u32::from(digit);
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            output.push((accumulator >> bits) as u8);
-            accumulator &= (1u32 << bits) - 1;
-        }
-    }
-    Ok(output)
+    let mut url = Url::parse("https://xboxapi.netlify.app/cik/")
+        .map_err(|error| format!("Could not construct the XboxApi CIK URL: {error}"))?;
+    url.path_segments_mut()
+        .map_err(|_| "Could not construct the XboxApi CIK URL.")?
+        .push(guid);
+    Ok(Some(url))
 }
 
 fn valid_product_id(value: &str) -> bool {

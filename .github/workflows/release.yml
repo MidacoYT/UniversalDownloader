@@ -27,6 +27,11 @@ jobs:
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install .NET SDK for XvdTool
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
@@ -66,7 +71,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Join-Path $stage "Xvd") | Out-Null
           New-Item -ItemType Directory -Force -Path (Join-Path $stage "OnlineFix") | Out-Null
           Copy-Item "target\release\universal-downloader.exe" $stage
-          Get-ChildItem "Xvd" -File | Where-Object { $_.Extension -ne ".pdb" } | Copy-Item -Destination (Join-Path $stage "Xvd")
+          dotnet publish "XvdTool.Streaming-master\XvdTool.Streaming\XvdTool.Streaming.csproj" -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None -o (Join-Path $stage "Xvd")
+          if ($LASTEXITCODE -ne 0) { throw "XvdTool publish failed with exit code $LASTEXITCODE" }
           Get-ChildItem "OnlineFix" -File | Copy-Item -Destination (Join-Path $stage "OnlineFix")
           $compiler = Get-ChildItem "${env:ProgramFiles(x86)}\Inno Setup *\ISCC.exe" | Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $compiler) { throw "Inno Setup compiler was not installed" }
