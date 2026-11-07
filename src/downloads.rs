@@ -38,6 +38,14 @@ fn download_log(message: impl AsRef<str>) {
     }
 }
 
+fn hide_child_console(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+}
+
 fn safe_url(url: &Url) -> String {
     let mut safe = url.clone();
     safe.set_query(None);
@@ -196,7 +204,7 @@ impl DownloadQueue {
                 self.changed.notify_all();
                 continue;
             }
-            if state.active < 2 && state.waiting.front() == Some(&id) {
+            if state.active < 1 && state.waiting.front() == Some(&id) {
                 state.waiting.pop_front();
                 state.active += 1;
                 return Some(QueuePermit(Arc::clone(self)));
@@ -1003,18 +1011,10 @@ fn run_epic_download(
         return Err("Epic manifest contains no chunks.".into());
     }
     let mut received_chunks = 0u64;
-    let cache_dir = std::env::temp_dir()
-        .join("UniversalDownloader")
-        .join(format!("epic-chunks-{id}"));
+    let cache_dir = root.join(".ud-epic-chunks");
     fs::create_dir_all(&cache_dir)
         .map_err(|e| format!("Could not create Epic chunk cache: {e}"))?;
     let _cache_guard = EpicChunkCache(cache_dir.clone());
-    let mut remaining = std::collections::HashMap::<[u32; 4], usize>::new();
-    for file in &files {
-        for part in &file.parts {
-            *remaining.entry(part.guid).or_default() += 1;
-        }
-    }
     let mut cached = std::collections::HashMap::<[u32; 4], PathBuf>::new();
     for file in files {
         if !control.wait_until_resumed() {
@@ -1076,34 +1076,36 @@ fn run_epic_download(
             })?;
             let path = epic_chunk_path(chunk, feature);
             if !cached.contains_key(&part.guid) {
-                let mut fetched = None;
-                for base in &game.cdn_bases {
-                    let url = format!("{}/{}", base.trim_end_matches('/'), path);
-                    match client
-                        .get(&url)
-                        .send()
-                        .and_then(|r| r.error_for_status())
-                        .and_then(|r| r.bytes())
-                    {
-                        Ok(data) => {
-                            fetched = Some(data.to_vec());
-                            break;
-                        }
-                        Err(_) => {}
-                    }
-                    if fetched.is_some() {
-                        break;
-                    }
-                }
-                let raw = fetched.ok_or_else(|| {
-                    format!("Could not fetch Epic chunk {} from available CDNs.", path)
-                })?;
                 let cache_path = cache_dir.join(format!(
                     "{:08X}{:08X}{:08X}{:08X}.chunk",
                     part.guid[0], part.guid[1], part.guid[2], part.guid[3]
                 ));
-                fs::write(&cache_path, raw)
-                    .map_err(|e| format!("Could not cache Epic chunk: {e}"))?;
+                let reusable = fs::read(&cache_path)
+                    .ok()
+                    .filter(|raw| epic_chunk_data(raw).is_ok());
+                if reusable.is_none() {
+                    let mut fetched = None;
+                    for base in &game.cdn_bases {
+                        let url = format!("{}/{}", base.trim_end_matches('/'), path);
+                        if let Ok(data) = client
+                            .get(&url)
+                            .send()
+                            .and_then(|r| r.error_for_status())
+                            .and_then(|r| r.bytes())
+                        {
+                            fetched = Some(data.to_vec());
+                            break;
+                        }
+                    }
+                    let raw = fetched.ok_or_else(|| {
+                        format!("Could not fetch Epic chunk {} from available CDNs.", path)
+                    })?;
+                    if epic_chunk_data(&raw).is_err() {
+                        return Err(format!("Epic CDN returned an invalid chunk: {path}"));
+                    }
+                    fs::write(&cache_path, &raw)
+                        .map_err(|e| format!("Could not cache Epic chunk: {e}"))?;
+                }
                 cached.insert(part.guid, cache_path);
                 received_chunks = received_chunks.saturating_add(chunk.size);
                 publish_progress(&tx, id, received_chunks, bytes_total, 0);
@@ -1120,13 +1122,6 @@ fn run_epic_download(
                 .write_all(&data[start..end])
                 .map_err(|e| e.to_string())?;
             file_hash.update(&data[start..end]);
-            let left = remaining.get_mut(&part.guid).unwrap();
-            *left -= 1;
-            if *left == 0 {
-                if let Some(path) = cached.remove(&part.guid) {
-                    let _ = fs::remove_file(path);
-                }
-            }
         }
         output.flush().map_err(|e| e.to_string())?;
         if file_hash.finalize().as_slice() != file.sha1.as_slice() {
@@ -1521,15 +1516,15 @@ fn resolve_asset_dir(folder: &str, override_key: &str, legacy_relative: &str) ->
 }
 
 fn read_developer_mode() -> Option<u32> {
-    let output = Command::new("reg.exe")
-        .args([
+    let mut command = Command::new("reg.exe");
+    command.args([
             "query",
             r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock",
             "/v",
             "AllowDevelopmentWithoutDevLicense",
-        ])
-        .output()
-        .ok()?;
+        ]);
+    hide_child_console(&mut command);
+    let output = command.output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -1563,8 +1558,10 @@ fn write_developer_mode(value: Option<u32>) -> Result<(), String> {
         args[0] = "delete".into();
         args.retain(|arg| !matches!(arg.as_str(), "/t" | "REG_DWORD"));
     }
-    let direct = Command::new("reg.exe")
-        .args(&args)
+    let mut direct_command = Command::new("reg.exe");
+    direct_command.args(&args);
+    hide_child_console(&mut direct_command);
+    let direct = direct_command
         .output()
         .map_err(|e| format!("Could not run reg.exe: {e}"))?;
     if direct.status.success() {
@@ -1581,8 +1578,10 @@ fn write_developer_mode(value: Option<u32>) -> Result<(), String> {
     let script = format!(
         "$p = Start-Process -FilePath 'reg.exe' -ArgumentList @({powershell_args}) -Verb RunAs -Wait -PassThru; exit $p.ExitCode"
     );
-    let elevated = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+    let mut elevated_command = Command::new("powershell.exe");
+    elevated_command.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+    hide_child_console(&mut elevated_command);
+    let elevated = elevated_command
         .status()
         .map_err(|e| format!("Could not request elevated registry access: {e}"))?;
     if elevated.success() {
@@ -1709,15 +1708,16 @@ fn register_extracted_package(
         );
         return Ok(true);
     }
-    let mut child = match Command::new(wdapp)
+    let mut wdapp_command = Command::new(wdapp);
+    wdapp_command
         .current_dir(game_dir)
         .arg("register")
         .arg(manifest)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
+        .stderr(Stdio::null());
+    hide_child_console(&mut wdapp_command);
+    let mut child = match wdapp_command.spawn() {
         Ok(child) => child,
         Err(error) => {
             let restore = write_developer_mode(previous_mode);
@@ -1847,6 +1847,7 @@ fn extract_msixvc(
         .args(["-n", "-j"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    hide_child_console(&mut command);
     if let Some(path) = cik.as_deref() {
         command.arg("-c").arg(path);
     }

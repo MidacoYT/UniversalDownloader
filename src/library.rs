@@ -5,6 +5,14 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
+fn hide_child_console(command: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+}
+
 #[derive(Clone)]
 pub struct LibraryEntry {
     pub name: String,
@@ -262,8 +270,10 @@ foreach ($package in $packages) {
     Remove-AppxPackage -Package $package.PackageFullName -ErrorAction Stop
 }
 "#;
-    let output = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])
+    let mut command = Command::new("powershell.exe");
+    command.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script]);
+    hide_child_console(&mut command);
+    let output = command
         .env("UD_UNINSTALL_TARGET", target)
         .stdin(Stdio::null())
         .output()
@@ -359,6 +369,7 @@ pub fn create_desktop_shortcut(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    hide_child_console(&mut command);
 
     let script = match store {
         crate::model::GameStore::Epic => {
