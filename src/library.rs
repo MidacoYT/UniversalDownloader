@@ -41,7 +41,9 @@ pub fn start_desktop_lookup() {
     if RESOLVED_HINT.get().is_some() {
         return;
     }
-    let lookup = DESKTOP_HINT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let lookup = DESKTOP_HINT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if lookup.get().is_some() {
         return;
     }
@@ -156,16 +158,17 @@ impl Library {
             .collect()
     }
 
-    pub fn scan(&mut self, root: &str) {
-        if self.is_scanning() {
-            return;
-        }
+    pub fn scan(&mut self, root: &str, excluded_paths: Vec<PathBuf>) {
         let root = PathBuf::from(root.trim());
+        let excluded_paths: HashSet<String> =
+            excluded_paths.iter().map(|path| path_key(path)).collect();
+        self.entries
+            .retain(|entry| !excluded_paths.contains(&path_key(&entry.path)));
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         self.status = "Scanning folder…".into();
         std::thread::spawn(move || {
-            let _ = tx.send(scan_folder(&root));
+            let _ = tx.send(scan_folder(&root, &excluded_paths));
         });
     }
 
@@ -207,7 +210,11 @@ impl Library {
         for entry in &mut self.entries {
             entry.game_id = match_installed_game(&entry.name, &titles).map(|g| g.id.clone());
         }
-        let supported = self.entries.iter().filter(|entry| entry.game_id.is_some()).count();
+        let supported = self
+            .entries
+            .iter()
+            .filter(|entry| entry.game_id.is_some())
+            .count();
         self.status = format!(
             "{supported} supported game{} found in the selected folder.",
             if supported == 1 { "" } else { "s" }
@@ -255,7 +262,7 @@ impl Library {
     }
 }
 
-fn scan_folder(root: &Path) -> ScanResult {
+fn scan_folder(root: &Path, excluded_paths: &HashSet<String>) -> ScanResult {
     if !root.is_dir() {
         return Err(format!("Folder not found: {}", root.display()));
     }
@@ -264,6 +271,9 @@ fn scan_folder(root: &Path) -> ScanResult {
         let item = item.map_err(|e| e.to_string())?;
         if item.file_type().map_err(|e| e.to_string())?.is_dir() {
             let path = item.path();
+            if excluded_paths.contains(&path_key(&path)) {
+                continue;
+            }
             entries.push(LibraryEntry {
                 name: item.file_name().to_string_lossy().into_owned(),
                 bytes: folder_size(&path),
@@ -274,6 +284,13 @@ fn scan_folder(root: &Path) -> ScanResult {
     }
     entries.sort_by_key(|e| e.name.to_lowercase());
     Ok(entries)
+}
+
+fn path_key(path: &Path) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .to_lowercase()
 }
 
 fn folder_size(path: &Path) -> u64 {
@@ -332,7 +349,14 @@ foreach ($package in $packages) {
 }
 "#;
     let mut command = Command::new("powershell.exe");
-    command.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script]);
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        script,
+    ]);
     hide_child_console(&mut command);
     let output = command
         .env("UD_UNINSTALL_TARGET", target)
@@ -511,7 +535,10 @@ $shortcutPath
         if shortcut_path.is_file() {
             Ok(shortcut_path)
         } else {
-            Err(format!("The desktop shortcut was not found at {}.", shortcut_path.display()))
+            Err(format!(
+                "The desktop shortcut was not found at {}.",
+                shortcut_path.display()
+            ))
         }
     } else {
         let details = String::from_utf8_lossy(&output.stderr).trim().to_owned();

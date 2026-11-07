@@ -79,7 +79,10 @@ impl App {
     fn scan_library(&mut self) {
         self.settings.persist();
         self.last_library_scan = Instant::now();
-        self.library.scan(&self.settings.library_dir);
+        self.library.scan(
+            &self.settings.library_dir,
+            self.downloads.incomplete_library_paths(),
+        );
     }
 
     fn rematch_library(&mut self) {
@@ -267,6 +270,8 @@ impl App {
                             &self.settings.library_dir,
                         ) {
                             self.downloads.notice = error;
+                        } else {
+                            self.scan_library();
                         }
                     }
                     GameStore::Epic => {
@@ -275,6 +280,8 @@ impl App {
                                 self.downloads.start_epic(&game, &self.settings.library_dir)
                             {
                                 self.downloads.notice = error;
+                            } else {
+                                self.scan_library();
                             }
                         } else {
                             self.downloads.notice = "Epic game metadata is unavailable. Refresh the Epic catalog and try again.".into();
@@ -321,15 +328,11 @@ impl App {
                 store,
                 launch_exe,
             } => {
-                self.library.status = match library::create_shortcut(
-                    &name,
-                    &path,
-                    store,
-                    launch_exe.as_deref(),
-                ) {
-                    Ok(path) => format!("Desktop shortcut created: {}", path.display()),
-                    Err(error) => format!("Could not create desktop shortcut: {error}"),
-                };
+                self.library.status =
+                    match library::create_shortcut(&name, &path, store, launch_exe.as_deref()) {
+                        Ok(path) => format!("Desktop shortcut created: {}", path.display()),
+                        Err(error) => format!("Could not create desktop shortcut: {error}"),
+                    };
             }
             Action::AskUninstall(entry) => self.pending_uninstall = Some(entry),
             Action::DismissUninstall => self.pending_uninstall = None,
@@ -390,15 +393,13 @@ impl App {
                 &mut self.images,
                 out,
             ),
-            Page::Downloads => {
-                downloads_page::show(
-                    ui,
-                    &self.catalog,
-                    &self.epic_catalog,
-                    &mut self.images,
-                    &mut self.downloads,
-                )
-            }
+            Page::Downloads => downloads_page::show(
+                ui,
+                &self.catalog,
+                &self.epic_catalog,
+                &mut self.images,
+                &mut self.downloads,
+            ),
             Page::Updates => updates_page::show(ui, &self.library, &mut self.updates),
             Page::Settings => settings_page::show(ui, &mut self.settings),
         }

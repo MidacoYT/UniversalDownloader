@@ -15,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const XBOX_RESOLVER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
 const XBOX_ASSET_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
+const MAX_DOWNLOAD_READ_RETRIES: u8 = 8;
 
 fn download_log(message: impl AsRef<str>) {
     let timestamp = SystemTime::now()
@@ -832,6 +833,31 @@ impl DownloadManager {
     pub fn take_library_change(&mut self) -> bool {
         std::mem::take(&mut self.library_needs_scan)
     }
+
+    pub fn incomplete_library_paths(&self) -> Vec<PathBuf> {
+        self.entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.status,
+                    DownloadStatus::Queued
+                        | DownloadStatus::Downloading
+                        | DownloadStatus::Extracting
+                        | DownloadStatus::Registering
+                        | DownloadStatus::Paused
+                        | DownloadStatus::Cancelled
+                        | DownloadStatus::Failed(_)
+                )
+            })
+            .map(|entry| {
+                if entry.product_id.is_some() {
+                    entry.path.parent().unwrap_or(&entry.path).to_path_buf()
+                } else {
+                    entry.path.clone()
+                }
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone)]
@@ -1357,15 +1383,34 @@ fn run_xbox_download(
             Err("paused".to_owned())
         }
         Err(error) => {
-            let cleanup = remove_partial(&partial_path);
-            let _ = fs::remove_file(&destination);
-            let _ = fs::remove_dir_all(&game_dir);
-            Err(match cleanup {
-                Ok(()) => error,
-                Err(cleanup_error) => {
-                    format!("{error}; could not remove partial file: {cleanup_error}")
-                }
-            })
+            if (error.starts_with("Could not read the download")
+                || error.starts_with("Download request failed:")
+                || error.starts_with("The connection ended early"))
+                && partial_path.is_file()
+                && fs::metadata(&partial_path)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0)
+                    > 0
+            {
+                download_log(format!(
+                    "Keeping partial Xbox package for resume: {} bytes at {}",
+                    fs::metadata(&partial_path)
+                        .map(|metadata| metadata.len())
+                        .unwrap_or(0),
+                    partial_path.display()
+                ));
+                Err(error)
+            } else {
+                let cleanup = remove_partial(&partial_path);
+                let _ = fs::remove_file(&destination);
+                let _ = fs::remove_dir_all(&game_dir);
+                Err(match cleanup {
+                    Ok(()) => error,
+                    Err(cleanup_error) => {
+                        format!("{error}; could not remove partial file: {cleanup_error}")
+                    }
+                })
+            }
         }
     };
     let _ = tx.send(DownloadEvent::Finished { id, result });
@@ -2109,8 +2154,9 @@ fn transfer(
         .map_err(|error| format!("Could not inspect partial download: {error}"))?
         .len();
     let mut total = 0;
+    let mut read_retries = 0u8;
 
-    loop {
+    'requests: loop {
         if !control.wait_until_resumed() {
             remove_partial(partial_path)
                 .map_err(|error| format!("Could not remove partial download: {error}"))?;
@@ -2281,7 +2327,39 @@ fn transfer(
                     }
                 }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(error) => return Err(format!("Could not read the download: {error}")),
+                Err(error) => {
+                    let error = error.to_string();
+                    output.flush().map_err(|flush_error| {
+                        format!(
+                            "Could not flush partial download after a read error: {flush_error}"
+                        )
+                    })?;
+                    drop(output);
+
+                    if total > 0 && received >= total {
+                        publish_progress(tx, id, received, total, 0);
+                        finish_file(partial_path, destination)?;
+                        return Ok(true);
+                    }
+                    if read_retries >= MAX_DOWNLOAD_READ_RETRIES {
+                        return Err(format!(
+                            "Could not read the download after {read_retries} retries: {error}"
+                        ));
+                    }
+
+                    read_retries += 1;
+                    let delay_seconds = u64::from(read_retries.min(5));
+                    download_log(format!(
+                        "Download body read failed at {received}/{total} bytes; retry {read_retries}/{MAX_DOWNLOAD_READ_RETRIES} in {delay_seconds}s: {error}"
+                    ));
+                    for _ in 0..delay_seconds * 4 {
+                        if !control.wait_until_resumed() {
+                            return Ok(false);
+                        }
+                        std::thread::sleep(Duration::from_millis(250));
+                    }
+                    continue 'requests;
+                }
             }
         }
     }

@@ -204,18 +204,13 @@ impl UpdateCheck {
                     release.update_available = is_newer(&release.version, current);
                     self.status = if release.update_available {
                         if release.installer_url.is_some() && release.installer_sha256.is_some() {
-                            format!(
-                                "Version {} is available (current: {}).",
-                                release.version, current
-                            )
+                            "A new version is available.".into()
                         } else {
-                            format!(
-                                "Version {} is available, but a verified installer is missing.",
-                                release.version
-                            )
+                            "A new version is available, but its verified installer is missing."
+                                .into()
                         }
                     } else {
-                        format!("You have the latest version ({current}).")
+                        "You have the latest version.".into()
                     };
                     self.release = Some(release);
                     changed = true;
