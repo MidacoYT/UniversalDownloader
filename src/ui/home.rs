@@ -1,15 +1,18 @@
 //! Page d'accueil : statistiques + carrousel des jeux les plus évalués.
-use super::{Action, Page, theme, widgets};
+use super::{Action, Page, icons, theme, widgets};
 use crate::catalog::Catalog;
 use crate::images::{self, ImageCache};
 use crate::library::Library;
 use crate::model::Game;
-use crate::util::{format_count, format_size};
+use crate::util::{format_count, format_size, top_k};
 use eframe::egui::{self, Color32, RichText};
 use fluent_egui::winui::prelude::*;
 
 const TILE_SIZE: egui::Vec2 = egui::vec2(184.0, 256.0);
 const TILE_ART_HEIGHT: f32 = 180.0;
+/// Diamètre des flèches du carrousel et marge entre elles et le bord du carrousel.
+const ARROW_SIZE: f32 = 40.0;
+const ARROW_INSET: f32 = 10.0;
 
 pub fn show(
     ui: &mut egui::Ui,
@@ -48,13 +51,14 @@ fn new_games_row(
     images: &mut ImageCache,
     out: &mut Vec<Action>,
 ) {
-    let mut new_games: Vec<_> = catalog
-        .games
-        .iter()
-        .filter(|game| !game.date_added.is_empty())
-        .collect();
-    new_games.sort_by(|a, b| b.date_added.cmp(&a.date_added));
-    new_games.truncate(8);
+    let new_games = top_k(
+        catalog
+            .games
+            .iter()
+            .filter(|game| !game.date_added.is_empty()),
+        8,
+        |a, b| b.date_added.cmp(&a.date_added),
+    );
     if new_games.is_empty() {
         return;
     }
@@ -142,7 +146,15 @@ fn top_games_header(
     ui.horizontal(|ui| {
         ui.label(RichText::new("Top Games").size(18.0).strong());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("View full catalog →").clicked() {
+            if widgets::pill_button(
+                ui,
+                "View full catalog",
+                None,
+                Some(icons::chevron_right(14.0)),
+                true,
+            )
+            .clicked()
+            {
                 out.push(Action::Navigate(Page::Catalog));
             }
             ui.label(
@@ -167,14 +179,12 @@ fn top_games_row(
     // Xbox is ordered by review count; Epic has no public player/review totals in
     // the manifest feed, so show its newest known releases without implying a rank.
     let xbox = catalog.top_games(5);
-    let mut epic: Vec<_> = epic_catalog.games.iter().collect();
-    epic.sort_by(|a, b| {
+    let epic = top_k(epic_catalog.games.iter(), 5, |a, b| {
         b.release_date_sort
             .cmp(&a.release_date_sort)
             .then_with(|| a.name.cmp(&b.name))
     });
-    epic.truncate(5);
-    let mut top = Vec::new();
+    let mut top = Vec::with_capacity(10);
     for index in 0..5 {
         if let Some(game) = xbox.get(index) {
             top.push((*game, index));
@@ -198,105 +208,136 @@ fn top_games_row(
         .ctx()
         .animate_value_with_time(animation_id, target_offset, 0.28);
     let sliding = (animated_offset - target_offset).abs() > 0.5;
-    ui.horizontal(|ui| {
-        let (left_slot, _) =
-            ui.allocate_exact_size(egui::vec2(40.0, TILE_SIZE.y), egui::Sense::hover());
-        let left = carousel_arrow(ui, left_slot, false, animated_offset > 0.0);
-        ui.add_space(6.0);
-        let viewport_width = (ui.available_width() - 40.0).max(0.0);
-        let mut area = egui::ScrollArea::horizontal()
-            .id_salt("home_top_games")
-            .auto_shrink([false, false])
-            .max_width(viewport_width)
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
-        if sliding {
-            area = area.horizontal_scroll_offset(animated_offset);
-        }
-        let output = area.show(ui, |ui| {
-            ui.horizontal(|ui| {
-                for (game, rank) in top.iter() {
-                    images.request(ui.ctx(), &game.id, &game.image, (480, 480));
-                    if tile(ui, *rank, game, images.get(&game.id)) {
-                        out.push(Action::OpenGame {
-                            id: game.id.clone(),
-                            store: game.store,
-                        });
-                    }
-                }
-            });
-        });
-        ui.ctx().data_mut(|data| {
-            data.insert_temp(current_offset_id, output.state.offset.x);
-        });
-        if sliding {
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(16));
-        }
-        let max_offset = (output.content_size.x - output.inner_rect.width()).max(0.0);
-        ui.add_space(6.0);
-        let (right_slot, _) =
-            ui.allocate_exact_size(egui::vec2(40.0, TILE_SIZE.y), egui::Sense::hover());
-        let right = carousel_arrow(ui, right_slot, true, output.state.offset.x < max_offset);
-        if left.clicked() || right.clicked() {
-            let delta = TILE_SIZE.x * 2.0;
-            let base = target_offset.max(output.state.offset.x);
-            let offset = if left.clicked() {
-                (base - delta).max(0.0)
-            } else {
-                (base + delta).min(max_offset)
-            };
-            ui.ctx()
-                .data_mut(|data| data.insert_temp(offset_id, offset));
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(16));
-        } else if !sliding {
-            ui.ctx().data_mut(|data| data.remove_temp::<f32>(offset_id));
-        }
-    });
+
+    // Le carrousel occupe toute la largeur ; les flèches sont dessinées PAR-DESSUS, sur ses
+    // bords gauche/droit, centrées verticalement sur la hauteur des cartes.
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), TILE_SIZE.y),
+        egui::Sense::hover(),
+    );
+    let step = (TILE_SIZE.x + ui.spacing().item_spacing.x) * 2.0;
+    let mut area = egui::ScrollArea::horizontal()
+        .id_salt("home_top_games")
+        .auto_shrink([false, false])
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
+    if sliding {
+        area = area.horizontal_scroll_offset(animated_offset);
+    }
+    let output = ui
+        .scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(egui::Layout::left_to_right(egui::Align::Min)),
+            |ui| {
+                area.show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for (game, rank) in top.iter() {
+                            images.request(ui.ctx(), &game.id, &game.image, (480, 480));
+                            if tile(ui, *rank, game, images.get(&game.id)) {
+                                out.push(Action::OpenGame {
+                                    id: game.id.clone(),
+                                    store: game.store,
+                                });
+                            }
+                        }
+                    });
+                })
+            },
+        )
+        .inner;
+    let offset = output.state.offset.x;
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(current_offset_id, offset));
+    if sliding {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(16));
+    }
+    let max_offset = (output.content_size.x - output.inner_rect.width()).max(0.0);
+
+    // Dessinées après le ScrollArea : au-dessus des cartes, et prioritaires pour le clic.
+    let center_y = rect.center().y;
+    let half = ARROW_SIZE / 2.0;
+    let left = carousel_arrow(
+        ui,
+        egui::pos2(rect.left() + ARROW_INSET + half, center_y),
+        false,
+        offset > 0.5,
+    );
+    let right = carousel_arrow(
+        ui,
+        egui::pos2(rect.right() - ARROW_INSET - half, center_y),
+        true,
+        offset < max_offset - 0.5,
+    );
+    if left || right {
+        let base = target_offset.max(offset);
+        let next = if left {
+            (base - step).max(0.0)
+        } else {
+            (base + step).min(max_offset)
+        };
+        ui.ctx().data_mut(|data| data.insert_temp(offset_id, next));
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(16));
+    } else if !sliding {
+        ui.ctx().data_mut(|data| data.remove_temp::<f32>(offset_id));
+    }
 }
 
-fn carousel_arrow(
-    ui: &mut egui::Ui,
-    slot: egui::Rect,
-    right: bool,
-    enabled: bool,
-) -> egui::Response {
-    let rect = egui::Rect::from_center_size(slot.center(), egui::vec2(40.0, 40.0));
+/// Flèche ronde posée sur le carrousel, centrée sur `center`. Retourne `true` au clic.
+/// Elle s'efface (et ne capte plus la souris) quand il n'y a plus rien à faire défiler.
+fn carousel_arrow(ui: &mut egui::Ui, center: egui::Pos2, right: bool, enabled: bool) -> bool {
+    let id = ui.make_persistent_id(("home_top_games_arrow", right));
+    let visible = ui
+        .ctx()
+        .animate_bool_with_time(id.with("visible"), enabled, 0.15);
+    if visible <= 0.0 {
+        return false;
+    }
+    let rect = egui::Rect::from_center_size(center, egui::vec2(ARROW_SIZE, ARROW_SIZE));
     let response = ui.interact(
         rect,
-        ui.make_persistent_id(("home_top_games_arrow", right)),
-        egui::Sense::click(),
-    );
-    let hover = ui.ctx().animate_bool_with_time(
-        response.id.with("carousel-arrow-hover"),
-        enabled && response.hovered(),
-        0.14,
-    );
-    ui.painter().circle_filled(
-        rect.center(),
-        19.0,
+        id,
         if enabled {
-            theme::mix((32, 27, 48), (119, 62, 220), hover)
+            egui::Sense::click()
         } else {
-            Color32::from_rgb(32, 30, 41)
+            egui::Sense::hover()
         },
     );
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        if right { "›" } else { "‹" },
-        egui::FontId::proportional(27.0),
-        if enabled {
-            Color32::WHITE
-        } else {
-            Color32::from_gray(100)
-        },
+    let active = enabled && response.hovered();
+    if active {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let hover = ui
+        .ctx()
+        .animate_bool_with_time(id.with("hover"), active, 0.14);
+
+    let radius = ARROW_SIZE / 2.0;
+    let painter = ui.painter();
+    painter.circle_filled(
+        center + egui::vec2(0.0, 2.0),
+        radius + 2.0,
+        Color32::from_black_alpha(90).gamma_multiply(visible),
     );
-    response.on_hover_cursor(if enabled {
-        egui::CursorIcon::PointingHand
-    } else {
-        egui::CursorIcon::Default
-    })
+    painter.circle(
+        center,
+        radius,
+        theme::mix((32, 27, 48), (119, 62, 220), hover).gamma_multiply(0.95 * visible),
+        egui::Stroke::new(1.0, theme::accent_alpha(150).gamma_multiply(visible)),
+    );
+    // Chevron tracé en vectoriel : toujours centré, contrairement à un glyphe « ‹ » / « › »
+    // dont la position verticale dépend de la police.
+    let dir = if right { 1.0 } else { -1.0 };
+    let (dx, dy) = (3.5 * dir, 7.0);
+    painter.add(egui::Shape::line(
+        vec![
+            egui::pos2(center.x - dx, center.y - dy),
+            egui::pos2(center.x + dx, center.y),
+            egui::pos2(center.x - dx, center.y + dy),
+        ],
+        egui::Stroke::new(2.5, Color32::WHITE.gamma_multiply(visible)),
+    ));
+    enabled && response.clicked()
 }
 
 /// Carte portrait d'un jeu ; retourne `true` au clic.

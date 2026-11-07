@@ -79,14 +79,8 @@ impl App {
     }
 
     fn rematch_library(&mut self) {
-        let games: Vec<_> = self
-            .catalog
-            .games
-            .iter()
-            .chain(&self.epic_catalog.games)
-            .cloned()
-            .collect();
-        self.library.rematch(&games);
+        self.library
+            .rematch(self.catalog.games.iter().chain(&self.epic_catalog.games));
         self.catalog.mark_dirty();
         self.epic_catalog.mark_dirty();
     }
@@ -98,6 +92,9 @@ impl App {
         let epic_catalog_changed = self.epic_catalog.poll();
         let epic_stats_updates: Vec<_> = self.epic_stats_rx.try_iter().collect();
         let epic_stats_changed = !epic_stats_updates.is_empty();
+        if epic_stats_changed {
+            self.epic_catalog.mark_dirty();
+        }
         for (id, result) in epic_stats_updates {
             if let Some(game) = self
                 .epic_catalog
@@ -342,6 +339,7 @@ impl App {
                 ui,
                 &mut self.library,
                 &self.catalog,
+                &self.epic_catalog,
                 &mut self.settings,
                 &mut self.images,
                 out,

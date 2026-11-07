@@ -4,7 +4,8 @@ pub mod api;
 use crate::library::Library;
 pub use crate::model::{ALL_GENRES, ALL_PLATFORMS};
 use crate::model::{Game, GameStore};
-use crate::util::size_in_gb;
+use crate::util::{size_in_gb, top_k};
+use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver};
 
 pub const PAGE_SIZE: usize = 24;
@@ -71,6 +72,11 @@ pub struct Catalog {
     rx: Option<Receiver<CatalogEvent>>,
     filter_key: String,
     dirty: bool,
+    /// Incrémenté à chaque modification des données : permet aux catalogues dérivés
+    /// (vue « All Catalog ») de ne se reconstruire que quand c'est nécessaire.
+    revision: u64,
+    /// Révisions (Xbox, Epic) utilisées lors de la dernière fusion dans `sync_combined`.
+    merged_from: Option<(u64, u64)>,
 }
 
 impl Catalog {
@@ -91,6 +97,8 @@ impl Catalog {
             rx: None,
             filter_key: String::new(),
             dirty: true,
+            revision: 0,
+            merged_from: None,
         }
     }
 
@@ -100,6 +108,32 @@ impl Catalog {
 
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// Reconstruit ce catalogue comme la concaténation de `xbox` et `epic`, uniquement si
+    /// l'un des deux a changé depuis la dernière fusion (avant : clone complet à chaque frame).
+    pub fn sync_combined(&mut self, xbox: &Catalog, epic: &Catalog) {
+        let sources = (xbox.revision, epic.revision);
+        if self.merged_from == Some(sources) {
+            return;
+        }
+        self.merged_from = Some(sources);
+        self.games.clear();
+        self.games.reserve(xbox.games.len() + epic.games.len());
+        self.games.extend(xbox.games.iter().cloned());
+        self.games.extend(epic.games.iter().cloned());
+        self.status = format!(
+            "{} Xbox · {} Epic games{}",
+            xbox.games.len(),
+            epic.games.len(),
+            if xbox.is_loading() || epic.is_loading() {
+                " · loading"
+            } else {
+                ""
+            }
+        );
+        self.mark_dirty();
     }
 
     pub fn game(&self, id: &str) -> Option<&Game> {
@@ -107,10 +141,9 @@ impl Catalog {
     }
 
     pub fn top_games(&self, count: usize) -> Vec<&Game> {
-        let mut games: Vec<&Game> = self.games.iter().collect();
-        games.sort_by(|a, b| b.rating_count.cmp(&a.rating_count));
-        games.truncate(count);
-        games
+        top_k(self.games.iter(), count, |a, b| {
+            b.rating_count.cmp(&a.rating_count)
+        })
     }
 
     pub fn reset_filters(&mut self) {
@@ -144,7 +177,7 @@ impl Catalog {
         self.rx = Some(rx);
         self.games.clear();
         self.visible.clear();
-        self.dirty = true;
+        self.mark_dirty();
         self.status = match self.store {
             GameStore::Xbox => "Loading the Xbox catalog…".into(),
             GameStore::Epic => "Loading the Epic Games catalog…".into(),
@@ -161,7 +194,7 @@ impl Catalog {
             match event {
                 CatalogEvent::Initial(games) => {
                     self.games = games;
-                    self.dirty = true;
+                    self.mark_dirty();
                     rematch = true;
                     self.status = match self.store {
                         GameStore::Xbox => format!(
@@ -172,12 +205,24 @@ impl Catalog {
                     };
                 }
                 CatalogEvent::Updated(updates) => {
-                    for updated in updates {
-                        if let Some(existing) = self.games.iter_mut().find(|g| g.id == updated.id) {
-                            *existing = updated;
-                        }
+                    // Index id → position construit une seule fois (avant : recherche linéaire
+                    // par jeu mis à jour, soit O(n²) sur un catalogue de plusieurs milliers).
+                    let positions: HashMap<&str, usize> = self
+                        .games
+                        .iter()
+                        .enumerate()
+                        .map(|(index, game)| (game.id.as_str(), index))
+                        .collect();
+                    let targets: Vec<(usize, Game)> = updates
+                        .into_iter()
+                        .filter_map(|updated| {
+                            positions.get(updated.id.as_str()).map(|&i| (i, updated))
+                        })
+                        .collect();
+                    for (index, updated) in targets {
+                        self.games[index] = updated;
                     }
-                    self.dirty = true;
+                    self.mark_dirty();
                 }
                 CatalogEvent::Done(Ok(count)) => {
                     self.status = match self.store {
@@ -201,7 +246,7 @@ impl Catalog {
         }
         if finished {
             self.rx = None;
-            self.dirty = true;
+            self.mark_dirty();
         }
         rematch
     }
@@ -227,6 +272,7 @@ impl Catalog {
         self.genres = collect_genres(&self.games);
 
         let query = self.search.trim().to_lowercase();
+        let genre = self.genre_filter.to_lowercase();
         let loading = self.is_loading();
         let installed = library.installed_ids();
         self.visible = self
@@ -236,7 +282,7 @@ impl Catalog {
             .filter(|(_, g)| {
                 (query.is_empty() || g.search_key.contains(&query))
                     && g.matches_platform(self.platform_filter, loading)
-                    && g.matches_genre(&self.genre_filter)
+                    && g.matches_genre(&genre)
                     && match self.installed_filter {
                         InstalledFilter::All => true,
                         InstalledFilter::Installed => installed.contains(g.id.as_str()),
@@ -254,8 +300,9 @@ impl Catalog {
             CatalogSort::Name => self
                 .visible
                 .sort_by_cached_key(|&i| games[i].name.to_lowercase()),
-            CatalogSort::Size => self.visible.sort_by(|&a, &b| {
-                size_in_gb(&games[b].size).total_cmp(&size_in_gb(&games[a].size))
+            // Taille parsée une seule fois par jeu (et non à chaque comparaison).
+            CatalogSort::Size => self.visible.sort_by_cached_key(|&i| {
+                std::cmp::Reverse((size_in_gb(&games[i].size) * 1024.0) as u64)
             }),
             CatalogSort::MostReviewed => self
                 .visible

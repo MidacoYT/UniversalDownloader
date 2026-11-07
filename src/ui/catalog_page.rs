@@ -8,6 +8,8 @@ use fluent_egui::winui::prelude::*;
 
 /// Largeur cible d'une carte portrait.
 const CARD_WIDTH: f32 = 224.0;
+/// Espace horizontal et vertical entre deux cartes.
+const GRID_GAP: f32 = 12.0;
 
 pub fn show(
     ui: &mut egui::Ui,
@@ -37,20 +39,7 @@ pub fn show_all(
     images: &mut ImageCache,
     out: &mut Vec<Action>,
 ) {
-    combined.games.clear();
-    combined.games.extend(xbox.games.iter().cloned());
-    combined.games.extend(epic.games.iter().cloned());
-    combined.status = format!(
-        "{} Xbox · {} Epic games{}",
-        xbox.games.len(),
-        epic.games.len(),
-        if xbox.is_loading() || epic.is_loading() {
-            " · loading"
-        } else {
-            ""
-        }
-    );
-    combined.mark_dirty();
+    combined.sync_combined(xbox, epic);
     render(
         ui,
         combined,
@@ -188,10 +177,7 @@ fn toolbar(
             CatalogSort::ALL.as_slice(),
             CatalogSort::label,
         );
-        if ui
-            .add_enabled(!catalog.is_loading(), egui::Button::new("Refresh"))
-            .clicked()
-        {
+        if widgets::pill_button(ui, "Refresh", None, None, !catalog.is_loading()).clicked() {
             match selected {
                 CatalogSelection::Xbox => out.push(Action::RefreshCatalog),
                 CatalogSelection::Epic => out.push(Action::RefreshEpicCatalog),
@@ -205,15 +191,17 @@ fn toolbar(
 }
 
 fn genre_filter(ui: &mut egui::Ui, catalog: &mut Catalog) {
-    egui::ComboBox::from_id_salt(("genre_filter", catalog.store as u8))
-        .selected_text(format!("Category: {}", catalog.genre_filter))
-        .width(220.0)
-        .show_ui(ui, |ui| {
-            ui.selectable_value(&mut catalog.genre_filter, ALL_GENRES.to_owned(), ALL_GENRES);
-            for genre in &catalog.genres {
-                ui.selectable_value(&mut catalog.genre_filter, genre.clone(), genre);
-            }
-        });
+    widgets::pill_scope(ui, |ui| {
+        egui::ComboBox::from_id_salt(("genre_filter", catalog.store as u8))
+            .selected_text(format!("Category: {}", catalog.genre_filter))
+            .width(220.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut catalog.genre_filter, ALL_GENRES.to_owned(), ALL_GENRES);
+                for genre in &catalog.genres {
+                    ui.selectable_value(&mut catalog.genre_filter, genre.clone(), genre);
+                }
+            });
+    });
     ui.add_space(6.0);
 }
 
@@ -221,15 +209,18 @@ fn pagination(ui: &mut egui::Ui, catalog: &mut Catalog, total_pages: usize) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(format!("{} result(s)", catalog.visible.len())).size(11.0));
         ui.add_space(12.0);
-        let previous = egui::Button::image_and_text(icons::chevron_left(14.0), "Previous");
-        if ui.add_enabled(catalog.page_index > 0, previous).clicked() {
+        let can_previous = catalog.page_index > 0;
+        if widgets::pill_button(ui, "Previous", Some(icons::chevron_left(14.0)), None, can_previous)
+            .clicked()
+        {
             catalog.page_index -= 1;
             catalog.scroll_top = true;
         }
         ui.label(format!("Page {} / {}", catalog.page_index + 1, total_pages));
-        let next = egui::Button::image_and_text(icons::chevron_right(14.0), "Next");
         let can_next = catalog.page_index + 1 < total_pages;
-        if ui.add_enabled(can_next, next).clicked() {
+        if widgets::pill_button(ui, "Next", None, Some(icons::chevron_right(14.0)), can_next)
+            .clicked()
+        {
             catalog.page_index += 1;
             catalog.scroll_top = true;
         }
@@ -248,17 +239,29 @@ fn grid(
         empty_state(ui, catalog, selected, loading, out);
         return;
     }
-    let count = ((ui.available_width() / CARD_WIDTH).floor() as usize).clamp(1, 5);
+    let available = ui.available_width();
+    let count = ((available / CARD_WIDTH).floor() as usize).clamp(1, 5);
     let games = catalog.page_games();
 
+    // Largeur de carte calculée une fois pour toutes les lignes : toutes les cartes ont
+    // exactement la même taille (avant, `ui.columns` pouvait élargir certaines lignes).
+    let width = ((available - GRID_GAP * (count - 1) as f32) / count as f32).floor();
     for row in games.chunks(count) {
-        ui.columns(count, |columns| {
-            for (column, game) in columns.iter_mut().zip(row) {
-                images.request(column.ctx(), &game.id, &game.image, (480, 480));
-                game_card::show(column, game, images.get(&game.id), loading, out);
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = GRID_GAP;
+            for game in row {
+                images.request(ui.ctx(), &game.id, &game.image, (480, 480));
+                ui.allocate_ui_with_layout(
+                    egui::vec2(width, 10.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(width);
+                        game_card::show(ui, game, images.get(&game.id), loading, out);
+                    },
+                );
             }
         });
-        ui.add_space(8.0);
+        ui.add_space(GRID_GAP);
     }
 }
 

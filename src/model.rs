@@ -2,6 +2,7 @@
 
 pub const ALL_PLATFORMS: &str = "All platforms";
 pub const ALL_GENRES: &str = "All genres";
+const ALL_GENRES_LOWER: &str = "all genres";
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub enum GameStore {
@@ -181,14 +182,16 @@ impl Game {
         }
     }
 
-    pub fn matches_genre(&self, filter: &str) -> bool {
-        let filter = filter.to_lowercase();
-        filter == ALL_GENRES.to_lowercase()
+    /// `filter_lc` doit déjà être en minuscules (calculé une seule fois par filtrage,
+    /// pas une fois par jeu). Une chaîne vide ou « All genres » laisse tout passer.
+    pub fn matches_genre(&self, filter_lc: &str) -> bool {
+        filter_lc.is_empty()
+            || filter_lc == ALL_GENRES_LOWER
             || self
                 .genres
                 .iter()
                 .chain(self.categories.iter())
-                .any(|genre| genre.to_lowercase().contains(&filter))
+                .any(|genre| genre.to_lowercase().contains(filter_lc))
     }
 }
 
@@ -213,6 +216,17 @@ mod tests {
         let g = Game::default();
         assert!(g.matches_platform("PC", true));
         assert!(!g.matches_platform("PC", false));
+    }
+
+    #[test]
+    fn genre_filter_expects_lowercase_input() {
+        let g = Game {
+            genres: vec!["Role-Playing".into()],
+            ..Default::default()
+        };
+        assert!(g.matches_genre("role"));
+        assert!(g.matches_genre("all genres"));
+        assert!(!g.matches_genre("racing"));
     }
 
     #[test]

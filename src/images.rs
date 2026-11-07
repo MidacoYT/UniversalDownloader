@@ -3,16 +3,21 @@ use crate::net;
 use eframe::egui::{self, Color32, CornerRadius, Rect, Vec2};
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex, PoisonError};
 
 type Loaded = (String, Option<egui::ColorImage>);
+type Job = (String, String, (u32, u32), egui::Context);
+
+/// Nombre de téléchargements d'images simultanés (évite un thread par jaquette).
+const WORKERS: usize = 6;
 
 pub fn hero_key(game_id: &str) -> String {
     format!("hero:{game_id}")
 }
 
 pub struct ImageCache {
-    tx: Sender<Loaded>,
     rx: Receiver<Loaded>,
+    jobs: Sender<Job>,
     pending: HashSet<String>,
     failed: HashSet<String>,
     textures: HashMap<String, egui::TextureHandle>,
@@ -20,10 +25,27 @@ pub struct ImageCache {
 
 impl ImageCache {
     pub fn new() -> Self {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel::<Loaded>();
+        let (jobs, job_rx) = mpsc::channel::<Job>();
+        let job_rx = Arc::new(Mutex::new(job_rx));
+        for _ in 0..WORKERS {
+            let job_rx = Arc::clone(&job_rx);
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                // Le thread s'arrête quand le cache (donc `jobs`) est détruit.
+                // Le verrou n'est tenu que le temps de recevoir la tâche (pas pendant le
+                // téléchargement), sinon les workers se bloqueraient les uns les autres.
+                loop {
+                    let job = job_rx.lock().unwrap_or_else(PoisonError::into_inner).recv();
+                    let Ok((key, url, max, ctx)) = job else { break };
+                    let _ = tx.send((key, load_image(&url, max)));
+                    ctx.request_repaint();
+                }
+            });
+        }
         Self {
-            tx,
             rx,
+            jobs,
             pending: HashSet::new(),
             failed: HashSet::new(),
             textures: HashMap::new(),
@@ -48,14 +70,10 @@ impl ImageCache {
         {
             return;
         }
-        let tx = self.tx.clone();
-        let key = key.to_owned();
-        let url = url.to_owned();
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send((key, load_image(&url, max)));
-            ctx.request_repaint();
-        });
+        let job = (key.to_owned(), url.to_owned(), max, ctx.clone());
+        if self.jobs.send(job).is_err() {
+            self.pending.remove(key);
+        }
     }
 
     /// Intègre les images terminées (à appeler une fois par frame).
@@ -85,8 +103,7 @@ impl ImageCache {
 }
 
 fn load_image(url: &str, max: (u32, u32)) -> Option<egui::ColorImage> {
-    let bytes = net::client(12)
-        .ok()?
+    let bytes = net::shared_client()?
         .get(url)
         .send()
         .ok()?

@@ -1,4 +1,5 @@
 //! Fonctions utilitaires sans état.
+use std::cmp::Ordering;
 use std::path::Path;
 
 pub const GIB: f64 = 1_073_741_824.0;
@@ -24,6 +25,27 @@ pub fn size_in_gb(value: &str) -> f64 {
         "KB" => amount / (1024.0 * 1024.0),
         _ => amount,
     }
+}
+
+/// Les `k` meilleurs éléments selon `cmp` (le « plus petit » en premier), en O(n·log k)
+/// et sans trier toute la collection. Stable : à égalité, l'ordre d'origine est conservé.
+pub fn top_k<T>(
+    items: impl IntoIterator<Item = T>,
+    k: usize,
+    mut cmp: impl FnMut(&T, &T) -> Ordering,
+) -> Vec<T> {
+    let mut best: Vec<T> = Vec::with_capacity(k + 1);
+    if k == 0 {
+        return best;
+    }
+    for item in items {
+        let pos = best.partition_point(|kept| cmp(kept, &item) != Ordering::Greater);
+        if pos < k {
+            best.insert(pos, item);
+            best.truncate(k);
+        }
+    }
+    best
 }
 
 pub fn format_count(count: u64) -> String {
@@ -99,6 +121,15 @@ mod tests {
     fn counts_get_separators() {
         assert_eq!(format_count(1234567), "1,234,567");
         assert_eq!(format_count(12), "12");
+    }
+
+    #[test]
+    fn top_k_keeps_best_in_order_and_is_stable() {
+        let items = [(3, 'a'), (9, 'b'), (9, 'c'), (1, 'd'), (7, 'e')];
+        let best = top_k(items, 3, |a, b| b.0.cmp(&a.0));
+        assert_eq!(best, vec![(9, 'b'), (9, 'c'), (7, 'e')]);
+        assert!(top_k(items, 0, |a, b| b.0.cmp(&a.0)).is_empty());
+        assert_eq!(top_k(items, 10, |a, b| b.0.cmp(&a.0)).len(), 5);
     }
 
     #[test]

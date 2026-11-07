@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
-const CATALOG_KEY: &str = "9eEo0ksYvZTsXgPiJUz7hQCio18hW+mPlQhy0UBq+10=";
+const CATALOG_KEY: &str = net::API_KEY;
 const CATALOG_URLS: [&str; 2] = [
     "https://xboxapi.netlify.app/games",
     "https://raw.githubusercontent.com/MidacoYT/Games/refs/heads/main/games.json",
@@ -49,7 +49,6 @@ fn run(tx: Sender<CatalogEvent>, store: GameStore) {
 }
 
 fn download_epic_catalog(client: &Client) -> Result<Vec<Game>, String> {
-    const CATALOG_KEY: &str = "9eEo0ksYvZTsXgPiJUz7hQCio18hW+mPlQhy0UBq+10=";
     let data: Value = client
         .get(format!("{EPIC_API_BASE}/games"))
         .bearer_auth(CATALOG_KEY)
@@ -82,86 +81,19 @@ pub fn parse_epic_catalog(data: &Value) -> Result<Vec<Game>, String> {
             name: name.to_owned(),
             store: GameStore::Epic,
             platform: "Windows".into(),
-            manifest_url: item
-                .get("manifestUrl")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            image: item
-                .get("image")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            hero: item
-                .get("hero")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            developer: item
-                .get("developer")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            publisher: item
-                .get("publisher")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            description: item
-                .get("description")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            long_description: item
-                .get("longDescription")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            egdata_offer_id: item
-                .get("egdataOfferId")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            launch_exe: item
-                .get("launchExe")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            egdata_url: item
-                .get("egdataUrl")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            cdn_bases: item
-                .get("cdnBases")
-                .and_then(Value::as_array)
-                .map(|xs| {
-                    xs.iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect()
-                })
-                .unwrap_or_default(),
-            genres: item
-                .get("genres")
-                .and_then(Value::as_array)
-                .map(|xs| {
-                    xs.iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect()
-                })
-                .unwrap_or_default(),
-            screenshots: item
-                .get("screenshots")
-                .and_then(Value::as_array)
-                .map(|xs| {
-                    xs.iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect()
-                })
-                .unwrap_or_default(),
+            manifest_url: str_field(item, "manifestUrl"),
+            image: str_field(item, "image"),
+            hero: str_field(item, "hero"),
+            developer: str_field(item, "developer"),
+            publisher: str_field(item, "publisher"),
+            description: str_field(item, "description"),
+            long_description: str_field(item, "longDescription"),
+            egdata_offer_id: str_field(item, "egdataOfferId"),
+            launch_exe: str_field(item, "launchExe"),
+            egdata_url: str_field(item, "egdataUrl"),
+            cdn_bases: strings(&item["cdnBases"]),
+            genres: strings(&item["genres"]),
+            screenshots: strings(&item["screenshots"]),
             ..Default::default()
         };
         if let Some(bytes) = item.get("installSize").and_then(Value::as_u64) {
@@ -211,7 +143,7 @@ pub fn parse_epic_catalog(data: &Value) -> Result<Vec<Game>, String> {
 
 /// Loads the public critic summary for one Epic offer on demand.
 pub fn fetch_epic_critic_stats(offer_id: &str) -> Result<(Option<u8>, Option<u8>), String> {
-    let client = net::client(20).map_err(|error| error.to_string())?;
+    let client = net::shared_client().ok_or("HTTP client unavailable.")?;
     let data: Value = client
         .get(format!("https://api.egdata.app/offers/{offer_id}/ratings"))
         .send()
@@ -357,6 +289,14 @@ fn absolute_url(uri: &str) -> String {
     } else {
         format!("https:{uri}")
     }
+}
+
+/// Champ texte d'un objet JSON (chaîne vide s'il est absent).
+fn str_field(item: &Value, key: &str) -> String {
+    item.get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
 }
 
 fn text(value: &Value) -> String {

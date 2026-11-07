@@ -207,6 +207,9 @@ pub struct DownloadManager {
     next_id: u64,
     tx: mpsc::Sender<DownloadEvent>,
     rx: Receiver<DownloadEvent>,
+    /// Dernier contenu écrit dans le fichier d'état : évite de réécrire le disque à chaque
+    /// événement de progression alors que la liste persistée n'a pas changé.
+    last_persisted: Mutex<Vec<u8>>,
 }
 
 impl DownloadManager {
@@ -218,6 +221,7 @@ impl DownloadManager {
             next_id: 1,
             tx,
             rx,
+            last_persisted: Mutex::new(Vec::new()),
         };
         manager.restore_xbox_downloads();
         manager
@@ -237,7 +241,13 @@ impl DownloadManager {
             Some(serde_json::json!({"id":entry.id,"product_id":product_id,"name":entry.name,"path":entry.path}))
         }).collect();
         if let Ok(data) = serde_json::to_vec_pretty(&items) {
-            let _ = fs::write(path, data);
+            let mut last = self
+                .last_persisted
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if *last != data && fs::write(path, &data).is_ok() {
+                *last = data;
+            }
         }
     }
 
@@ -1692,7 +1702,7 @@ fn extract_msixvc(
 }
 
 fn fetch_cik(product_id: &str) -> Result<Option<PathBuf>, String> {
-    const API_KEY: &str = "9eEo0ksYvZTsXgPiJUz7hQCio18hW+mPlQhy0UBq+10=";
+    const API_KEY: &str = crate::net::API_KEY;
     let client = Client::builder()
         .timeout(Duration::from_secs(30))
         .user_agent(crate::net::USER_AGENT)

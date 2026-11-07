@@ -128,23 +128,31 @@ impl Library {
     }
 
     /// Associe chaque dossier à un jeu du catalogue.
-    pub fn rematch(&mut self, games: &[Game]) {
+    pub fn rematch<'a>(&mut self, games: impl IntoIterator<Item = &'a Game>) {
+        // Titres normalisés une seule fois (et non une fois par dossier et par jeu).
+        let titles: Vec<(String, &Game)> = games
+            .into_iter()
+            .map(|game| (normalize_title(&game.name), game))
+            .filter(|(title, _)| title.len() >= MIN_TITLE_LEN)
+            .collect();
         for entry in &mut self.entries {
-            entry.game_id = match_installed_game(&entry.name, games).map(|g| g.id.clone());
+            entry.game_id = match_installed_game(&entry.name, &titles).map(|g| g.id.clone());
         }
     }
 
-    /// Lignes filtrées et triées pour l'affichage.
-    pub fn rows<'a>(&'a self, games: &'a [Game]) -> Vec<LibraryRow<'a>> {
+    /// Lignes filtrées et triées pour l'affichage. `catalogs` : tous les catalogues où chercher
+    /// le jeu associé (Xbox ET Epic).
+    pub fn rows<'a>(&'a self, catalogs: &[&'a [Game]]) -> Vec<LibraryRow<'a>> {
         let filter = self.search.trim().to_lowercase();
         let mut rows: Vec<LibraryRow<'a>> = self
             .entries
             .iter()
             .filter_map(|entry| {
-                let game = entry
-                    .game_id
-                    .as_deref()
-                    .and_then(|id| games.iter().find(|g| g.id == id));
+                let game = entry.game_id.as_deref().and_then(|id| {
+                    catalogs
+                        .iter()
+                        .find_map(|games| games.iter().find(|g| g.id == id))
+                });
                 let row = LibraryRow { entry, game };
                 (entry.name.to_lowercase().contains(&filter)
                     || row.title().to_lowercase().contains(&filter))
@@ -152,7 +160,7 @@ impl Library {
             })
             .collect();
         match self.sort {
-            LibrarySort::Name => rows.sort_by_key(|r| r.title().to_lowercase()),
+            LibrarySort::Name => rows.sort_by_cached_key(|r| r.title().to_lowercase()),
             LibrarySort::Size => rows.sort_by(|a, b| b.entry.bytes.cmp(&a.entry.bytes)),
         }
         rows
@@ -226,20 +234,22 @@ fn remove_game_folder(entry: &LibraryEntry, library_root: &str) -> Result<(), St
     std::fs::remove_dir_all(&target).map_err(|e| format!("Could not remove the game folder: {e}"))
 }
 
-fn match_installed_game<'a>(folder: &str, games: &'a [Game]) -> Option<&'a Game> {
+/// Longueur minimale d'un titre normalisé pour être associé à un dossier.
+const MIN_TITLE_LEN: usize = 5;
+
+/// `titles` : couples (titre normalisé, jeu) déjà filtrés sur `MIN_TITLE_LEN`.
+fn match_installed_game<'a>(folder: &str, titles: &[(String, &'a Game)]) -> Option<&'a Game> {
     let folder = normalize_title(folder);
-    games
+    if folder.is_empty() {
+        return None;
+    }
+    titles
         .iter()
-        .filter_map(|game| {
-            let title = normalize_title(&game.name);
-            if title.len() < 5 {
-                return None;
-            }
-            (folder == title || folder.starts_with(&title) || title.starts_with(&folder))
-                .then_some((title.len(), game))
+        .filter(|(title, _)| {
+            folder == *title || folder.starts_with(title.as_str()) || title.starts_with(&folder)
         })
-        .max_by_key(|(score, _)| *score)
-        .map(|(_, game)| game)
+        .max_by_key(|(title, _)| title.len())
+        .map(|(_, game)| *game)
 }
 
 /// Lance le premier .exe du dossier (hors utilitaires `wdapp`).

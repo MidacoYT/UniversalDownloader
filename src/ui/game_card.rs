@@ -180,12 +180,20 @@ fn or_default(value: &str, fallback: &str) -> String {
 }
 
 fn meta_row(ui: &mut egui::Ui, items: Vec<(egui::Image<'static>, String)>) {
-    ui.horizontal(|ui| {
-        for (image, text) in items {
-            ui.add(image);
-            ui.label(widgets::muted(text, 11.0));
-        }
-    });
+    // Largeur imposée + texte tronqué : un libellé long (« Single-player · Multiplayer »)
+    // ne doit jamais élargir la carte et casser la grille.
+    let width = ui.available_width();
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, 18.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.set_max_width(width);
+            for (image, text) in items {
+                ui.add(image);
+                ui.add(egui::Label::new(widgets::muted(text, 11.0)).truncate());
+            }
+        },
+    );
 }
 
 fn actions(ui: &mut egui::Ui, game: &Game, out: &mut Vec<Action>) {

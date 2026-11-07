@@ -14,6 +14,7 @@ pub fn show(
     ui: &mut egui::Ui,
     library: &mut Library,
     catalog: &Catalog,
+    epic_catalog: &Catalog,
     settings: &mut Settings,
     images: &mut ImageCache,
     out: &mut Vec<Action>,
@@ -32,7 +33,7 @@ pub fn show(
     let view = library.view;
     let scanning = library.is_scanning();
     let library = &*library;
-    let rows = library.rows(&catalog.games);
+    let rows = library.rows(&[catalog.games.as_slice(), epic_catalog.games.as_slice()]);
 
     egui::ScrollArea::vertical()
         .id_salt("library_scroll")
