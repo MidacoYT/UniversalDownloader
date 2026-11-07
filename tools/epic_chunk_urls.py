@@ -209,6 +209,21 @@ def catalog_cache_match(
     return match_title_asset(title, candidates)
 
 
+def indexed_asset(metadata: dict[str, str], app_name: str) -> dict[str, str] | None:
+    """Build an Epic asset from identifiers saved by the Legendary exporter."""
+    namespace = str(metadata.get("namespace", "")).strip()
+    catalog_item_id = str(metadata.get("catalog_item_id", "")).strip()
+    if not namespace or not catalog_item_id:
+        return None
+    return {
+        "app_name": app_name,
+        "namespace": namespace,
+        "catalog_item_id": catalog_item_id,
+        "source": "manifest-index",
+        "catalog_title": str(metadata.get("game", "")).strip(),
+    }
+
+
 def load_asset_map(token: str) -> tuple[dict[str, dict[str, str]], list[dict[str, str]]]:
     assets: dict[str, dict[str, str]] = {}
     title_assets: list[dict[str, str]] = []
@@ -427,6 +442,12 @@ def load_manifest_index(path: Path) -> dict[str, dict[str, str]]:
     return result
 
 
+def write_text_atomic(path: Path, content: str) -> None:
+    temporary = path.with_suffix(path.suffix + ".part")
+    temporary.write_text(content, encoding="utf-8")
+    temporary.replace(path)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest-dir", type=Path, default=Path("Epic_Manifests"))
@@ -456,11 +477,11 @@ def main() -> int:
             "clientId": OAUTH_CLIENT_ID,
             "responseType": "code",
         })
-        print("\nOuvre ce lien dans ton navigateur connecté à Epic Games :")
+        print("\nOpen this link in a browser signed in to Epic Games:")
         print(authorization_link)
-        print("Copie le champ authorizationCode de la réponse Epic.\n")
+        print("Copy the authorizationCode field from Epic's response.\n")
         code, grant_type = normalize_authorization_input(getpass.getpass(
-            "authorizationCode, JSON ou URL de réponse Epic : "
+            "Epic authorizationCode, JSON, or response URL: "
         ))
         if not code:
             print("No authorization code was entered.", file=sys.stderr)
@@ -484,12 +505,27 @@ def main() -> int:
             if isinstance(item, dict) and item.get("appName")
         }
         summary_order = []
+
+        def save_summary() -> None:
+            ordered = [summary_by_app[key] for key in summary_order if key in summary_by_app]
+            ordered_keys = set(summary_order)
+            ordered.extend(value for key, value in summary_by_app.items() if key not in ordered_keys)
+            write_text_atomic(
+                summary_path,
+                json.dumps(ordered, indent=2, ensure_ascii=False) + "\n",
+            )
+
         for manifest_path in manifests:
             metadata = manifest_index.get(manifest_path.name.casefold(), {})
             app_name = str(metadata.get("app_name", "")).strip()
             title = str(metadata.get("game", "")).strip() or manifest_path.stem
             try:
                 candidates = []
+                # The exporter obtains these exact IDs from Legendary's Epic
+                # asset data; prefer them to fuzzy title matching.
+                direct_indexed_asset = indexed_asset(metadata, app_name)
+                if direct_indexed_asset:
+                    candidates.append(direct_indexed_asset)
                 if app_name:
                     direct_asset = asset_map.get(app_name.casefold())
                     if direct_asset:
@@ -519,7 +555,10 @@ def main() -> int:
                         seen.add(key)
                         unique_candidates.append(candidate)
                 if not unique_candidates:
-                    raise RuntimeError("No appName/namespace/catalogItemId match in Epic account data or local catalog cache")
+                    raise RuntimeError(
+                        "No appName/namespace/catalogItemId match in the manifest index, "
+                        "Epic account data, or local catalog cache"
+                    )
                 feature_level, chunk_dir, chunks = read_manifest_chunks(manifest_path)
                 asset = None
                 bases = None
@@ -539,7 +578,7 @@ def main() -> int:
                 output_app_name = app_name or resolved_app_name
                 urls = [f"{base}/{chunk['path']}" for chunk in chunks for base in bases]
                 filename = f"{manifest_path.stem}.txt"
-                (args.output / filename).write_text("\n".join(urls) + "\n", encoding="utf-8")
+                write_text_atomic(args.output / filename, "\n".join(urls) + "\n")
                 cloud = split_cloud_dir(bases[0])
                 chunks_filename = f"{manifest_path.stem}.json"
                 chunk_data = {
@@ -557,9 +596,9 @@ def main() -> int:
                     "cdnBases": bases,
                     "chunks": chunks,
                 }
-                (chunk_data_dir / chunks_filename).write_text(
+                write_text_atomic(
+                    chunk_data_dir / chunks_filename,
                     json.dumps(chunk_data, separators=(",", ":"), ensure_ascii=False) + "\n",
-                    encoding="utf-8",
                 )
                 summary_by_app[output_app_name] = {
                     "name": title,
@@ -575,15 +614,18 @@ def main() -> int:
                     "chunkDataFile": f"chunks/{chunks_filename}",
                 }
                 summary_order.append(output_app_name)
+                save_summary()
                 print(
                     f"{title}: {len(chunks)} chunks, {len(bases)} CDN(s) "
                     f"(metadata source={asset.get('source')}, Epic appName={resolved_app_name})"
                 )
+            except KeyboardInterrupt:
+                save_summary()
+                print("\nInterrupted; completed game results are saved in summary.json.", file=sys.stderr)
+                break
             except Exception as exc:
                 print(f"Skip {title}: {exc}", file=sys.stderr)
-        ordered_summary = [summary_by_app.pop(key) for key in summary_order if key in summary_by_app]
-        ordered_summary.extend(summary_by_app.values())
-        summary_path.write_text(json.dumps(ordered_summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        save_summary()
         print(f"Wrote results to {args.output.resolve()}")
         return 0
     except (OSError, ValueError, RuntimeError, urllib.error.URLError) as exc:
