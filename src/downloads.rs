@@ -2445,29 +2445,31 @@ mod tests {
     }
 
     #[test]
-    fn downloads_direct_http_file_without_overwriting() {
+    fn transfers_direct_http_payload_without_overwriting() {
         let body = b"authorized test payload";
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let mut line = String::new();
-            loop {
-                line.clear();
-                reader.read_line(&mut line).unwrap();
-                if line == "\r\n" || line.is_empty() {
-                    break;
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
                 }
+                drop(reader);
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(body).unwrap();
             }
-            drop(reader);
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            )
-            .unwrap();
-            stream.write_all(body).unwrap();
         });
 
         let nonce = SystemTime::now()
@@ -2475,37 +2477,19 @@ mod tests {
             .unwrap()
             .as_nanos();
         let folder = std::env::temp_dir().join(format!("universal-downloader-{nonce}"));
-        let mut manager = DownloadManager::new();
-        manager
-            .start(
-                &format!("http://{address}/sample.zip"),
-                "sample",
-                &folder.display().to_string(),
-            )
-            .unwrap();
-
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            manager.poll();
-            match &manager.entries[0].status {
-                DownloadStatus::Completed => break,
-                DownloadStatus::Failed(error) => panic!("download failed: {error}"),
-                _ if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-                _ => panic!("download did not complete in time"),
-            }
-        }
+        fs::create_dir_all(&folder).unwrap();
+        let destination = folder.join("sample.zip");
+        let partial = partial_path(&destination);
+        File::create(&partial).unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let control = Control::new();
+        let url = format!("http://{address}/sample.zip");
+        assert!(transfer(&url, false, &destination, &partial, 1, &control, &tx).unwrap());
+        let second_partial = partial_path(&destination);
+        File::create(&second_partial).unwrap();
+        assert!(transfer(&url, false, &destination, &second_partial, 2, &control, &tx).is_err());
         server.join().unwrap();
-        assert_eq!(fs::read(folder.join("sample.zip")).unwrap(), body);
-        assert!(
-            manager
-                .start(
-                    &format!("http://{address}/sample.zip"),
-                    "sample",
-                    &folder.display().to_string(),
-                )
-                .is_err()
-        );
-        assert_eq!(fs::read(folder.join("sample.zip")).unwrap(), body);
+        assert_eq!(fs::read(&destination).unwrap(), body);
         fs::remove_dir_all(folder).unwrap();
     }
 }
