@@ -31,10 +31,19 @@ pub enum Page {
     Settings,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum CatalogSelection {
+    #[default]
+    All,
+    Xbox,
+    Epic,
+}
+
 /// Intentions émises par l'interface, traitées par `App::apply`.
 pub enum Action {
     Navigate(Page),
-    SelectCatalog(crate::model::GameStore),
+    SelectCatalog(CatalogSelection),
+    ResetAllCatalogFilters,
     OpenGame {
         id: String,
         store: crate::model::GameStore,

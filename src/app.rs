@@ -8,8 +8,8 @@ use crate::player::TrailerPlayer;
 use crate::settings::Settings;
 use crate::ui::game_modal::ModalState;
 use crate::ui::{
-    Action, Page, catalog_page, downloads_page, game_modal, home, library_page, settings_page,
-    sidebar, theme, trailer_overlay, uninstall_modal, updates_page,
+    Action, CatalogSelection, Page, catalog_page, downloads_page, game_modal, home, library_page,
+    settings_page, sidebar, theme, trailer_overlay, uninstall_modal, updates_page,
 };
 use crate::updates::UpdateCheck;
 use eframe::egui;
@@ -27,7 +27,8 @@ pub struct App {
     epic_catalog: Catalog,
     epic_stats_tx: Sender<(String, Result<(Option<u8>, Option<u8>), String>)>,
     epic_stats_rx: Receiver<(String, Result<(Option<u8>, Option<u8>), String>)>,
-    selected_catalog: GameStore,
+    selected_catalog: CatalogSelection,
+    combined_catalog: Catalog,
     library: Library,
     settings: Settings,
     updates: UpdateCheck,
@@ -50,7 +51,8 @@ impl App {
             epic_catalog: Catalog::new(GameStore::Epic),
             epic_stats_tx,
             epic_stats_rx,
-            selected_catalog: GameStore::Xbox,
+            selected_catalog: CatalogSelection::All,
+            combined_catalog: Catalog::new(GameStore::Xbox),
             library: Library::new(),
             settings: Settings::load(),
             updates: UpdateCheck::new(),
@@ -148,24 +150,55 @@ impl App {
             Action::Navigate(page) => {
                 self.page = page;
                 if page == Page::Catalog {
-                    let catalog = match self.selected_catalog {
-                        GameStore::Xbox => &mut self.catalog,
-                        GameStore::Epic => &mut self.epic_catalog,
-                    };
-                    if catalog.games.is_empty() && !catalog.is_loading() {
-                        catalog.refresh();
+                    match self.selected_catalog {
+                        CatalogSelection::Xbox => {
+                            if self.catalog.games.is_empty() && !self.catalog.is_loading() {
+                                self.catalog.refresh();
+                            }
+                        }
+                        CatalogSelection::Epic => {
+                            if self.epic_catalog.games.is_empty() && !self.epic_catalog.is_loading()
+                            {
+                                self.epic_catalog.refresh();
+                            }
+                        }
+                        CatalogSelection::All => {
+                            if self.catalog.games.is_empty() && !self.catalog.is_loading() {
+                                self.catalog.refresh();
+                            }
+                            if self.epic_catalog.games.is_empty() && !self.epic_catalog.is_loading()
+                            {
+                                self.epic_catalog.refresh();
+                            }
+                            self.combined_catalog.scroll_top = true;
+                        }
                     }
                 }
             }
-            Action::SelectCatalog(store) => {
-                self.selected_catalog = store;
-                let catalog = match store {
-                    GameStore::Xbox => &mut self.catalog,
-                    GameStore::Epic => &mut self.epic_catalog,
-                };
-                catalog.scroll_top = true;
-                if catalog.games.is_empty() && !catalog.is_loading() {
-                    catalog.refresh();
+            Action::SelectCatalog(selection) => {
+                self.selected_catalog = selection;
+                match selection {
+                    CatalogSelection::Xbox => {
+                        self.catalog.scroll_top = true;
+                        if self.catalog.games.is_empty() && !self.catalog.is_loading() {
+                            self.catalog.refresh();
+                        }
+                    }
+                    CatalogSelection::Epic => {
+                        self.epic_catalog.scroll_top = true;
+                        if self.epic_catalog.games.is_empty() && !self.epic_catalog.is_loading() {
+                            self.epic_catalog.refresh();
+                        }
+                    }
+                    CatalogSelection::All => {
+                        self.combined_catalog.scroll_top = true;
+                        if self.catalog.games.is_empty() && !self.catalog.is_loading() {
+                            self.catalog.refresh();
+                        }
+                        if self.epic_catalog.games.is_empty() && !self.epic_catalog.is_loading() {
+                            self.epic_catalog.refresh();
+                        }
+                    }
                 }
             }
             Action::OpenGame { id, store } => {
@@ -240,6 +273,7 @@ impl App {
             }
             Action::ResetCatalogFilters => self.catalog.reset_filters(),
             Action::ResetEpicCatalogFilters => self.epic_catalog.reset_filters(),
+            Action::ResetAllCatalogFilters => self.combined_catalog.reset_filters(),
             Action::ScanLibrary => self.scan_library(),
             Action::PlayGame { name, path } => {
                 let epic_exe = self
@@ -278,7 +312,16 @@ impl App {
                 out,
             ),
             Page::Catalog => match self.selected_catalog {
-                GameStore::Xbox => catalog_page::show(
+                CatalogSelection::All => catalog_page::show_all(
+                    ui,
+                    &mut self.combined_catalog,
+                    &self.catalog,
+                    &self.epic_catalog,
+                    &self.library,
+                    &mut self.images,
+                    out,
+                ),
+                CatalogSelection::Xbox => catalog_page::show(
                     ui,
                     &mut self.catalog,
                     self.selected_catalog,
@@ -286,7 +329,7 @@ impl App {
                     &mut self.images,
                     out,
                 ),
-                GameStore::Epic => catalog_page::show(
+                CatalogSelection::Epic => catalog_page::show(
                     ui,
                     &mut self.epic_catalog,
                     self.selected_catalog,

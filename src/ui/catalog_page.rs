@@ -1,9 +1,8 @@
 //! Page « Catalog » : recherche, filtres, pagination et grille de cartes.
-use super::{Action, game_card, icons, widgets};
+use super::{Action, CatalogSelection, game_card, icons, widgets};
 use crate::catalog::{ALL_GENRES, Catalog, CatalogSort, InstalledFilter, PLATFORMS};
 use crate::images::ImageCache;
 use crate::library::Library;
-use crate::model::GameStore;
 use eframe::egui::{self, Color32, RichText};
 use fluent_egui::winui::prelude::*;
 
@@ -13,14 +12,68 @@ const CARD_WIDTH: f32 = 224.0;
 pub fn show(
     ui: &mut egui::Ui,
     catalog: &mut Catalog,
-    selected_store: GameStore,
+    selected_store: CatalogSelection,
+    library: &Library,
+    images: &mut ImageCache,
+    out: &mut Vec<Action>,
+) {
+    render(
+        ui,
+        catalog,
+        selected_store,
+        catalog.is_loading(),
+        library,
+        images,
+        out,
+    );
+}
+
+pub fn show_all(
+    ui: &mut egui::Ui,
+    combined: &mut Catalog,
+    xbox: &Catalog,
+    epic: &Catalog,
+    library: &Library,
+    images: &mut ImageCache,
+    out: &mut Vec<Action>,
+) {
+    combined.games.clear();
+    combined.games.extend(xbox.games.iter().cloned());
+    combined.games.extend(epic.games.iter().cloned());
+    combined.status = format!(
+        "{} Xbox · {} Epic games{}",
+        xbox.games.len(),
+        epic.games.len(),
+        if xbox.is_loading() || epic.is_loading() {
+            " · loading"
+        } else {
+            ""
+        }
+    );
+    combined.mark_dirty();
+    render(
+        ui,
+        combined,
+        CatalogSelection::All,
+        xbox.is_loading() || epic.is_loading(),
+        library,
+        images,
+        out,
+    );
+}
+
+fn render(
+    ui: &mut egui::Ui,
+    catalog: &mut Catalog,
+    selected_store: CatalogSelection,
+    loading: bool,
     library: &Library,
     images: &mut ImageCache,
     out: &mut Vec<Action>,
 ) {
     catalog.refresh_visible(library);
     let mut area = egui::ScrollArea::vertical()
-        .id_salt(("catalog_scroll", catalog.store as u8))
+        .id_salt(("catalog_scroll", selected_store as u8))
         .max_height(ui.available_height())
         .auto_shrink([false, false]);
     if std::mem::take(&mut catalog.scroll_top) {
@@ -36,38 +89,49 @@ pub fn show(
             );
             store_selector(ui, selected_store, out);
             ui.add_space(10.0);
-            toolbar(ui, catalog, out);
+            toolbar(ui, catalog, selected_store, out);
             genre_filter(ui, catalog);
             let total_pages = catalog.total_pages();
             catalog.page_index = catalog.page_index.min(total_pages - 1);
 
-            widgets::status_line(ui, catalog.is_loading(), &catalog.status);
+            widgets::status_line(ui, loading, &catalog.status);
             ui.add_space(8.0);
-            grid(ui, catalog, images, out);
+            grid(ui, catalog, images, selected_store, loading, out);
             ui.add_space(12.0);
             pagination(ui, catalog, total_pages);
         });
     });
 }
 
-fn store_selector(ui: &mut egui::Ui, selected: GameStore, out: &mut Vec<Action>) {
+fn store_selector(ui: &mut egui::Ui, selected: CatalogSelection, out: &mut Vec<Action>) {
     ui.add_space(8.0);
     ui.vertical_centered(|ui| {
         ui.label(widgets::muted("Switch catalog", 10.0));
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.add_space((ui.available_width() - 548.0).max(0.0) / 2.0);
-            store_button(ui, GameStore::Xbox, selected, out);
+            let available = ui.available_width();
+            let button_width = ((available - 24.0) / 3.0).clamp(132.0, 268.0);
+            ui.add_space((available - (button_width * 3.0 + 24.0)).max(0.0) / 2.0);
+            store_button(ui, CatalogSelection::Xbox, selected, button_width, out);
             ui.add_space(12.0);
-            store_button(ui, GameStore::Epic, selected, out);
+            store_button(ui, CatalogSelection::Epic, selected, button_width, out);
+            ui.add_space(12.0);
+            store_button(ui, CatalogSelection::All, selected, button_width, out);
         });
     });
 }
 
-fn store_button(ui: &mut egui::Ui, store: GameStore, selected: GameStore, out: &mut Vec<Action>) {
+fn store_button(
+    ui: &mut egui::Ui,
+    store: CatalogSelection,
+    selected: CatalogSelection,
+    width: f32,
+    out: &mut Vec<Action>,
+) {
     let (title, logo) = match store {
-        GameStore::Xbox => ("Xbox Game Pass", icons::xbox_game_pass(34.0)),
-        GameStore::Epic => ("Epic Games", icons::epic_games(34.0)),
+        CatalogSelection::Xbox => ("Xbox Game Pass", icons::xbox_game_pass(34.0)),
+        CatalogSelection::Epic => ("Epic Games", icons::epic_games(34.0)),
+        CatalogSelection::All => ("All Catalog", icons::catalog(34.0)),
     };
     let is_selected = store == selected;
     let fill = if is_selected {
@@ -87,12 +151,17 @@ fn store_button(ui: &mut egui::Ui, store: GameStore, selected: GameStore, out: &
             stroke,
         ))
         .corner_radius(9);
-    if ui.add_sized(egui::vec2(268.0, 62.0), button).clicked() {
+    if ui.add_sized(egui::vec2(width, 62.0), button).clicked() {
         out.push(Action::SelectCatalog(store));
     }
 }
 
-fn toolbar(ui: &mut egui::Ui, catalog: &mut Catalog, out: &mut Vec<Action>) {
+fn toolbar(
+    ui: &mut egui::Ui,
+    catalog: &mut Catalog,
+    selected: CatalogSelection,
+    out: &mut Vec<Action>,
+) {
     ui.horizontal(|ui| {
         ui.add(
             FluentTextEdit::new(&mut catalog.search).hint_text("Search title, studio, or genre"),
@@ -122,10 +191,14 @@ fn toolbar(ui: &mut egui::Ui, catalog: &mut Catalog, out: &mut Vec<Action>) {
             .add_enabled(!catalog.is_loading(), egui::Button::new("Refresh"))
             .clicked()
         {
-            out.push(match catalog.store {
-                GameStore::Xbox => Action::RefreshCatalog,
-                GameStore::Epic => Action::RefreshEpicCatalog,
-            });
+            match selected {
+                CatalogSelection::Xbox => out.push(Action::RefreshCatalog),
+                CatalogSelection::Epic => out.push(Action::RefreshEpicCatalog),
+                CatalogSelection::All => {
+                    out.push(Action::RefreshCatalog);
+                    out.push(Action::RefreshEpicCatalog);
+                }
+            }
         }
     });
 }
@@ -162,12 +235,18 @@ fn pagination(ui: &mut egui::Ui, catalog: &mut Catalog, total_pages: usize) {
     });
 }
 
-fn grid(ui: &mut egui::Ui, catalog: &Catalog, images: &mut ImageCache, out: &mut Vec<Action>) {
+fn grid(
+    ui: &mut egui::Ui,
+    catalog: &Catalog,
+    images: &mut ImageCache,
+    selected: CatalogSelection,
+    loading: bool,
+    out: &mut Vec<Action>,
+) {
     if catalog.visible.is_empty() {
-        empty_state(ui, catalog, out);
+        empty_state(ui, catalog, selected, loading, out);
         return;
     }
-    let loading = catalog.is_loading();
     let count = ((ui.available_width() / CARD_WIDTH).floor() as usize).clamp(1, 5);
     let games = catalog.page_games();
 
@@ -182,10 +261,16 @@ fn grid(ui: &mut egui::Ui, catalog: &Catalog, images: &mut ImageCache, out: &mut
     }
 }
 
-fn empty_state(ui: &mut egui::Ui, catalog: &Catalog, out: &mut Vec<Action>) {
+fn empty_state(
+    ui: &mut egui::Ui,
+    catalog: &Catalog,
+    selected: CatalogSelection,
+    loading: bool,
+    out: &mut Vec<Action>,
+) {
     ui.add_space(24.0);
     ui.vertical_centered(|ui| {
-        let text = if catalog.games.is_empty() && catalog.is_loading() {
+        let text = if catalog.games.is_empty() && loading {
             "Loading catalog…"
         } else if catalog.games.is_empty() {
             "The catalog is empty. Click “Refresh”."
@@ -194,9 +279,10 @@ fn empty_state(ui: &mut egui::Ui, catalog: &Catalog, out: &mut Vec<Action>) {
         };
         ui.label(RichText::new(text).color(Color32::GRAY));
         if !catalog.games.is_empty() && ui.button("Reset filters").clicked() {
-            out.push(match catalog.store {
-                GameStore::Xbox => Action::ResetCatalogFilters,
-                GameStore::Epic => Action::ResetEpicCatalogFilters,
+            out.push(match selected {
+                CatalogSelection::All => Action::ResetAllCatalogFilters,
+                CatalogSelection::Xbox => Action::ResetCatalogFilters,
+                CatalogSelection::Epic => Action::ResetEpicCatalogFilters,
             });
         }
     });
