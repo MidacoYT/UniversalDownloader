@@ -61,7 +61,10 @@ fn path_bar(ui: &mut egui::Ui, library: &Library, settings: &mut Settings, out: 
             }
         }
         if ui
-            .add_enabled(!library.is_scanning(), FluentButton::accent("Scan"))
+            .add_enabled(
+                !library.is_scanning(),
+                egui::Button::image_and_text(icons::refresh(14.0), "Refresh"),
+            )
             .clicked()
         {
             out.push(Action::ScanLibrary);
