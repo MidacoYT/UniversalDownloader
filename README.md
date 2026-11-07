@@ -24,3 +24,49 @@ Le port cherche `Xvd/` et `OnlineFix/` à côté de l’exécutable, puis dans l
 
 Les diagnostics des téléchargements sont ajoutés à `%APPDATA%\UniversalDownloader\app.log`. Les URL signées sont journalisées sans leur query string ; les réponses HTTP en erreur incluent un extrait du corps pour faciliter le diagnostic.
 La bibliothèque rapproche le nom de chaque dossier des titres récupérés dans le catalogue Xbox. Les dossiers reconnus affichent leur jeu et leur éditeur, et un bouton ouvre la fiche correspondante. Les dossiers sans correspondance restent affichés avec leur nom d’origine.
+
+## Proposer l’ajout d’un jeu
+
+Les contributions de jeux se font par [issue GitHub](https://github.com/MidacoYT/UniversalDownloader/issues/new). Indique le nom exact du jeu et la boutique concernée, puis joins les données demandées ci-dessous. L’équipe vérifiera les fichiers avant de mettre à jour le catalogue. Ne joins jamais de mot de passe, cookie, code d’autorisation ou jeton de compte.
+
+### Xbox / Microsoft Store
+
+1. Assure-toi d’avoir accès au jeu sur ton compte Xbox/Microsoft.
+2. Utilise [CikExtractor](https://github.com/LukeFZ/CikExtractor) pour extraire la CIK du package installé par l’application Xbox.
+3. Crée une issue avec le nom du jeu, son **Product ID Microsoft** (par exemple `9NG07QJNK38J`) et joins le fichier `.cik` extrait. N’envoie pas de clé provenant d’un jeu auquel tu n’as pas accès.
+
+La CIK permet de déchiffrer le package Xbox. Ne publie pas de jeton XboxApi : il n’est pas nécessaire pour que l’équipe traite la proposition.
+
+### Epic Games
+
+Les scripts de `tools` récupèrent le manifeste BuildPatch et les données nécessaires pour reconstruire les URL de chunks.
+
+1. Installe Legendary et connecte-toi au compte qui possède le jeu :
+
+   ```powershell
+   python -m pip install legendary-gl
+   legendary auth
+   ```
+
+2. Exporte les manifestes des jeux Epic accessibles à ce compte. Tu peux les écrire directement dans le dossier de manifestes d’EpicApi :
+
+   ```powershell
+   python "tools\export_epic_manifests (1).py" --output "D:\EpicApi\public\manifests"
+   ```
+
+   Le script écrit aussi `_resultats.csv`. Vérifie que le manifeste du jeu proposé a le statut `OK`.
+
+3. Vérifie que le jeu figure dans `D:\EpicApi\functions\data\games.json` et que son champ `manifest` correspond au nom du fichier `.manifest`. Puis récupère les URL des chunks :
+
+   ```powershell
+   python tools\epic_chunk_urls.py `
+     --games-json "D:\EpicApi\functions\data\games.json" `
+     --manifest-dir "D:\EpicApi\public\manifests" `
+     --output "epic_chunk_urls"
+   ```
+
+   Le script demande le code d’autorisation Epic avec une saisie masquée. Il est à usage unique : ne l’ajoute jamais à l’issue. Les fichiers générés comprennent `summary.json`, un `.txt` d’URL par jeu et `chunks\<manifest>.json` avec les identifiants des chunks et leurs CDN.
+
+4. Ouvre une issue en précisant le nom du jeu et son `appName`, puis joins le `.manifest`, son entrée de résumé et le JSON `chunks` correspondant. Ajoute aussi le `.txt` d’URL si les pièces jointes le permettent. N’inclus aucun code d’autorisation, jeton d’accès ou cookie Epic.
+
+Les chemins `D:\EpicApi\...` sont les valeurs par défaut du projet. Si EpicApi se trouve ailleurs, adapte les chemins dans la commande.
