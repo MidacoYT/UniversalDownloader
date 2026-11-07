@@ -19,20 +19,24 @@ pub fn show(
     out: &mut Vec<Action>,
 ) {
     catalog.refresh_visible(library);
+    widgets::page_header(
+        ui,
+        "DISCOVER",
+        "Game catalog",
+        "Browse Xbox Game Pass and Epic Games.",
+    );
+    store_selector(ui, selected_store, out);
+    ui.add_space(8.0);
+
     let mut area = egui::ScrollArea::vertical()
         .id_salt(("catalog_scroll", catalog.store as u8))
+        .max_height(ui.available_height())
         .auto_shrink([false, false]);
     if std::mem::take(&mut catalog.scroll_top) {
         area = area.vertical_scroll_offset(0.0);
     }
     area.show(ui, |ui| {
         ui.winui(|ui| {
-            widgets::page_header(
-                ui,
-                "DISCOVER",
-                "Game catalog",
-                "Browse Xbox Game Pass and Epic Games.",
-            );
             toolbar(ui, catalog, out);
             genre_filter(ui, catalog);
             let total_pages = catalog.total_pages();
@@ -43,9 +47,6 @@ pub fn show(
             grid(ui, catalog, images, out);
             ui.add_space(12.0);
             pagination(ui, catalog, total_pages);
-            ui.add_space(10.0);
-            ui.separator();
-            store_selector(ui, selected_store, out);
         });
     });
 }
