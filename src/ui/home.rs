@@ -199,13 +199,9 @@ fn top_games_row(
         .animate_value_with_time(animation_id, target_offset, 0.28);
     let sliding = (animated_offset - target_offset).abs() > 0.5;
     ui.horizontal(|ui| {
-        let left = ui
-            .allocate_ui_with_layout(
-                egui::vec2(40.0, TILE_SIZE.y),
-                egui::Layout::centered_and_justified(egui::Direction::TopDown),
-                |ui| carousel_arrow(ui, false, animated_offset > 0.0),
-            )
-            .inner;
+        let (left_slot, _) =
+            ui.allocate_exact_size(egui::vec2(40.0, TILE_SIZE.y), egui::Sense::hover());
+        let left = carousel_arrow(ui, left_slot, false, animated_offset > 0.0);
         ui.add_space(6.0);
         let viewport_width = (ui.available_width() - 40.0).max(0.0);
         let mut area = egui::ScrollArea::horizontal()
@@ -238,13 +234,9 @@ fn top_games_row(
         }
         let max_offset = (output.content_size.x - output.inner_rect.width()).max(0.0);
         ui.add_space(6.0);
-        let right = ui
-            .allocate_ui_with_layout(
-                egui::vec2(40.0, TILE_SIZE.y),
-                egui::Layout::centered_and_justified(egui::Direction::TopDown),
-                |ui| carousel_arrow(ui, true, output.state.offset.x < max_offset),
-            )
-            .inner;
+        let (right_slot, _) =
+            ui.allocate_exact_size(egui::vec2(40.0, TILE_SIZE.y), egui::Sense::hover());
+        let right = carousel_arrow(ui, right_slot, true, output.state.offset.x < max_offset);
         if left.clicked() || right.clicked() {
             let delta = TILE_SIZE.x * 2.0;
             let base = target_offset.max(output.state.offset.x);
@@ -263,8 +255,18 @@ fn top_games_row(
     });
 }
 
-fn carousel_arrow(ui: &mut egui::Ui, right: bool, enabled: bool) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(40.0, 40.0), egui::Sense::click());
+fn carousel_arrow(
+    ui: &mut egui::Ui,
+    slot: egui::Rect,
+    right: bool,
+    enabled: bool,
+) -> egui::Response {
+    let rect = egui::Rect::from_center_size(slot.center(), egui::vec2(40.0, 40.0));
+    let response = ui.interact(
+        rect,
+        ui.make_persistent_id(("home_top_games_arrow", right)),
+        egui::Sense::click(),
+    );
     let hover = ui.ctx().animate_bool_with_time(
         response.id.with("carousel-arrow-hover"),
         enabled && response.hovered(),

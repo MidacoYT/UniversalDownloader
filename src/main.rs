@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 //! Universal Downloader — point d'entrée.
 //!
 //! Architecture :
@@ -48,6 +50,7 @@ fn main() -> eframe::Result<()> {
         .with_material_opacity(0.78)
         .with_backdrop(BackdropKind::Mica);
     let options = eframe::NativeOptions {
+        centered: true,
         viewport: egui::ViewportBuilder::default()
             .with_title("Universal Downloader")
             .with_icon(app_icon())
