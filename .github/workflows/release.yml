@@ -25,6 +25,11 @@ jobs:
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: universal-downloader-windows-release
+
       - name: Assign commit build version
         id: version
         shell: pwsh
