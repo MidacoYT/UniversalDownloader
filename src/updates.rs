@@ -5,7 +5,7 @@ use std::{
     fs::{self, File},
     io::{Read, Write},
     process::Command,
-    sync::mpsc::{self, Receiver, TryRecvError},
+    sync::mpsc::{self, Receiver, Sender, TryRecvError},
     time::Duration,
 };
 
@@ -28,7 +28,13 @@ pub struct UpdateCheck {
     pub release: Option<ReleaseInfo>,
     pub status: String,
     rx: Option<Receiver<Result<Option<ReleaseInfo>, String>>>,
-    install_rx: Option<Receiver<Result<(), String>>>,
+    install_rx: Option<Receiver<InstallEvent>>,
+    pub install_progress: Option<(u64, Option<u64>)>,
+}
+
+enum InstallEvent {
+    Progress(u64, Option<u64>),
+    Finished(Result<(), String>),
 }
 
 impl UpdateCheck {
@@ -38,6 +44,7 @@ impl UpdateCheck {
             status: "Checking for app updates…".into(),
             rx: None,
             install_rx: None,
+            install_progress: None,
         };
         state.refresh();
         state
@@ -124,10 +131,11 @@ impl UpdateCheck {
         let version = release.version.clone();
         let (tx, rx) = mpsc::channel();
         self.install_rx = Some(rx);
+        self.install_progress = Some((0, None));
         self.status = format!("Downloading version {version} installer…");
         std::thread::spawn(move || {
-            let result = download_and_launch_installer(&url, &version, &sha256);
-            let _ = tx.send(result);
+            let result = download_and_launch_installer(&url, &version, &sha256, &tx);
+            let _ = tx.send(InstallEvent::Finished(result));
         });
     }
 
@@ -138,21 +146,47 @@ impl UpdateCheck {
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
         if let Some(rx) = self.install_rx.take() {
-            match rx.try_recv() {
-                Ok(Ok(())) => {
-                    self.status =
-                        "The installer is running and will restart the app when ready.".into();
-                    changed = true;
+            let mut finished = false;
+            loop {
+                match rx.try_recv() {
+                    Ok(InstallEvent::Progress(received, total)) => {
+                        self.install_progress = Some((received, total));
+                        self.status = match total.filter(|total| *total > 0) {
+                            Some(total) => format!(
+                                "Downloading update: {}%",
+                                (received.saturating_mul(100) / total).min(100)
+                            ),
+                            None => format!("Downloading update: {} MB", received / (1024 * 1024)),
+                        };
+                        changed = true;
+                    }
+                    Ok(InstallEvent::Finished(Ok(()))) => {
+                        self.status =
+                            "The installer is running and will restart the app when ready.".into();
+                        self.install_progress = None;
+                        finished = true;
+                        changed = true;
+                        break;
+                    }
+                    Ok(InstallEvent::Finished(Err(error))) => {
+                        self.status = format!("Could not install the update: {error}");
+                        self.install_progress = None;
+                        finished = true;
+                        changed = true;
+                        break;
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        self.status = "The update installer stopped unexpectedly.".into();
+                        self.install_progress = None;
+                        finished = true;
+                        changed = true;
+                        break;
+                    }
                 }
-                Ok(Err(error)) => {
-                    self.status = format!("Could not install the update: {error}");
-                    changed = true;
-                }
-                Err(TryRecvError::Empty) => self.install_rx = Some(rx),
-                Err(TryRecvError::Disconnected) => {
-                    self.status = "The update installer stopped unexpectedly.".into();
-                    changed = true;
-                }
+            }
+            if !finished {
+                self.install_rx = Some(rx);
             }
         }
 
@@ -202,6 +236,7 @@ fn download_and_launch_installer(
     url: &str,
     version: &str,
     expected_sha256: &str,
+    progress: &Sender<InstallEvent>,
 ) -> Result<(), String> {
     let parsed_url = reqwest::Url::parse(url).map_err(|error| error.to_string())?;
     if parsed_url.scheme() != "https" || parsed_url.host_str() != Some("github.com") {
@@ -236,6 +271,9 @@ fn download_and_launch_installer(
     let mut installer = File::create(&installer_path).map_err(|error| error.to_string())?;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
+    let total = response.content_length();
+    let mut received = 0_u64;
+    let mut last_report = std::time::Instant::now();
     loop {
         let count = match response.read(&mut buffer) {
             Ok(count) => count,
@@ -254,7 +292,13 @@ fn download_and_launch_installer(
             return Err(error.to_string());
         }
         hasher.update(&buffer[..count]);
+        received = received.saturating_add(count as u64);
+        if last_report.elapsed() >= Duration::from_millis(150) {
+            let _ = progress.send(InstallEvent::Progress(received, total));
+            last_report = std::time::Instant::now();
+        }
     }
+    let _ = progress.send(InstallEvent::Progress(received, total));
     drop(installer);
     let actual_sha256 = format!("{:x}", hasher.finalize());
     if actual_sha256 != expected_sha256 {

@@ -126,6 +126,8 @@ pub struct Download {
     pub downloaded_size: u64,
     pub registration: Option<Result<(), String>>,
     control: Arc<Control>,
+    product_id: Option<String>,
+    restored: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -209,12 +211,86 @@ pub struct DownloadManager {
 impl DownloadManager {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::channel();
-        Self {
+        let mut manager = Self {
             entries: Vec::new(),
             notice: String::new(),
             next_id: 1,
             tx,
             rx,
+        };
+        manager.restore_xbox_downloads();
+        manager
+    }
+
+    fn persist_xbox_downloads(&self) {
+        let Some(path) = download_state_path() else {
+            return;
+        };
+        let Some(parent) = path.parent() else { return };
+        if fs::create_dir_all(parent).is_err() {
+            return;
+        }
+        let items: Vec<_> = self.entries.iter().filter_map(|entry| {
+            let product_id = entry.product_id.as_ref()?;
+            if !matches!(entry.status, DownloadStatus::Queued | DownloadStatus::Downloading | DownloadStatus::Paused | DownloadStatus::Extracting | DownloadStatus::Registering) { return None; }
+            Some(serde_json::json!({"id":entry.id,"product_id":product_id,"name":entry.name,"path":entry.path}))
+        }).collect();
+        if let Ok(data) = serde_json::to_vec_pretty(&items) {
+            let _ = fs::write(path, data);
+        }
+    }
+
+    fn restore_xbox_downloads(&mut self) {
+        let Some(path) = download_state_path() else {
+            return;
+        };
+        let Ok(data) = fs::read(path) else { return };
+        let Ok(items) = serde_json::from_slice::<Vec<serde_json::Value>>(&data) else {
+            return;
+        };
+        for item in items {
+            let (Some(id), Some(product_id), Some(name), Some(destination)) = (
+                item.get("id").and_then(|v| v.as_u64()),
+                item.get("product_id").and_then(|v| v.as_str()),
+                item.get("name").and_then(|v| v.as_str()),
+                item.get("path").and_then(|v| v.as_str()),
+            ) else {
+                continue;
+            };
+            if !valid_product_id(product_id) {
+                continue;
+            }
+            let destination = PathBuf::from(destination);
+            if !destination.is_absolute() {
+                continue;
+            }
+            let partial = partial_path(&destination);
+            if !partial.exists() && !destination.exists() {
+                continue;
+            }
+            let has_complete_package = destination.is_file();
+            let received = fs::metadata(&partial).map(|m| m.len()).unwrap_or(0);
+            let control = Arc::new(Control::new());
+            control.set(ControlState::Paused);
+            self.next_id = self.next_id.max(id.saturating_add(1));
+            self.entries.push(Download {
+                id,
+                name: name.to_owned(),
+                path: destination.clone(),
+                received,
+                total: 0,
+                speed: 0,
+                status: DownloadStatus::Paused,
+                downloaded_size: if has_complete_package {
+                    fs::metadata(&destination).map(|m| m.len()).unwrap_or(0)
+                } else {
+                    received
+                },
+                registration: None,
+                control,
+                product_id: Some(product_id.to_owned()),
+                restored: true,
+            });
         }
     }
 
@@ -290,8 +366,11 @@ impl DownloadManager {
             downloaded_size: 0,
             registration: None,
             control: Arc::clone(&control),
+            product_id: None,
+            restored: false,
         };
         self.entries.push(entry);
+        self.persist_xbox_downloads();
         self.notice.clear();
 
         let tx = self.tx.clone();
@@ -369,7 +448,10 @@ impl DownloadManager {
             downloaded_size: 0,
             registration: None,
             control: Arc::clone(&control),
+            product_id: Some(product_id.to_owned()),
+            restored: false,
         });
+        self.persist_xbox_downloads();
         self.notice.clear();
         let tx = self.tx.clone();
         let product_id = product_id.to_owned();
@@ -379,72 +461,15 @@ impl DownloadManager {
             game_dir.display()
         ));
         std::thread::spawn(move || {
-            let result = match resolve_xbox_package(&product_id) {
-                Ok((url, expected_size)) => {
-                    let result =
-                        transfer(&url, true, &destination, &partial_path, id, &control, &tx);
-                    if let Ok(true) = result {
-                        if expected_size > 0
-                            && fs::metadata(&destination).map(|m| m.len()).unwrap_or(0)
-                                != expected_size
-                        {
-                            Err(format!(
-                                "Downloaded package size differs from Microsoft metadata ({expected_size} bytes)."
-                            ))
-                        } else {
-                            let package_bytes =
-                                fs::metadata(&destination).map(|m| m.len()).unwrap_or(0);
-                            let _ = tx.send(DownloadEvent::Extracting { id, package_bytes });
-                            match extract_msixvc(
-                                &destination,
-                                &game_dir,
-                                &product_id,
-                                package_bytes,
-                                &control,
-                                &tx,
-                                id,
-                            ) {
-                                Ok(true) => {
-                                    let _ = fs::remove_file(&destination);
-                                    match register_extracted_package(&game_dir, &control, &tx, id) {
-                                        Ok(true) => Ok(true),
-                                        Ok(false) => Ok(false),
-                                        Err(error) => Err(error),
-                                    }
-                                }
-                                Ok(false) => Ok(false),
-                                Err(error) => Err(error),
-                            }
-                        }
-                    } else {
-                        result
-                    }
-                }
-                Err(e) => Err(e),
-            };
-            if let Err(error) = &result {
-                download_log(format!(
-                    "Xbox download failed for product_id={product_id}: {error}"
-                ));
-            } else {
-                download_log(format!(
-                    "Xbox download completed for product_id={product_id}"
-                ));
-            }
-            let result = match result {
-                Ok(true) => Ok(()),
-                Ok(false) => Err("cancelled".to_owned()),
-                Err(e) => {
-                    let cleanup = remove_partial(&partial_path);
-                    let _ = fs::remove_file(&destination);
-                    let _ = fs::remove_dir_all(&game_dir);
-                    Err(match cleanup {
-                        Ok(()) => e,
-                        Err(c) => format!("{e}; could not remove partial file: {c}"),
-                    })
-                }
-            };
-            let _ = tx.send(DownloadEvent::Finished { id, result });
+            run_xbox_download(
+                id,
+                product_id,
+                destination,
+                game_dir,
+                partial_path,
+                control,
+                tx,
+            )
         });
         Ok(())
     }
@@ -462,15 +487,41 @@ impl DownloadManager {
                 entry.status = DownloadStatus::Paused;
             }
         }
+        self.persist_xbox_downloads();
     }
 
     pub fn resume(&mut self, id: u64) {
+        let restored_index = self.entries.iter().position(|item| {
+            item.id == id && item.status == DownloadStatus::Paused && item.restored
+        });
+        if let Some(index) = restored_index {
+            let entry = &mut self.entries[index];
+            let Some(product_id) = entry.product_id.clone() else {
+                return;
+            };
+            let destination = entry.path.clone();
+            let Some(game_dir) = destination.parent().map(Path::to_path_buf) else {
+                return;
+            };
+            let partial = partial_path(&destination);
+            let control = Arc::clone(&entry.control);
+            entry.restored = false;
+            entry.status = DownloadStatus::Downloading;
+            let tx = self.tx.clone();
+            let id = entry.id;
+            std::thread::spawn(move || {
+                run_xbox_download(id, product_id, destination, game_dir, partial, control, tx)
+            });
+            self.persist_xbox_downloads();
+            return;
+        }
         if let Some(entry) = self.entries.iter_mut().find(|item| item.id == id) {
             if entry.status == DownloadStatus::Paused {
                 entry.control.set(ControlState::Running);
                 entry.status = DownloadStatus::Downloading;
             }
         }
+        self.persist_xbox_downloads();
     }
 
     pub fn cancel(&mut self, id: u64) {
@@ -487,6 +538,7 @@ impl DownloadManager {
                 entry.status = DownloadStatus::Cancelled;
             }
         }
+        self.persist_xbox_downloads();
     }
 
     pub fn poll(&mut self) -> bool {
@@ -528,6 +580,7 @@ impl DownloadManager {
                                 DownloadStatus::Completed
                             }
                             Err(error) if error == "cancelled" => DownloadStatus::Cancelled,
+                            Err(error) if error == "paused" => DownloadStatus::Paused,
                             Err(error) => DownloadStatus::Failed(error),
                         };
                         changed = true;
@@ -581,6 +634,9 @@ impl DownloadManager {
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
         }
+        if changed {
+            self.persist_xbox_downloads();
+        }
         changed
     }
 
@@ -596,6 +652,94 @@ impl DownloadManager {
             )
         })
     }
+}
+
+fn run_xbox_download(
+    id: u64,
+    product_id: String,
+    destination: PathBuf,
+    game_dir: PathBuf,
+    partial_path: PathBuf,
+    control: Arc<Control>,
+    tx: mpsc::Sender<DownloadEvent>,
+) {
+    let result = match resolve_xbox_package(&product_id) {
+        Ok((url, expected_size)) => {
+            let transfer_result = if destination.is_file() {
+                Ok(true)
+            } else {
+                transfer(&url, true, &destination, &partial_path, id, &control, &tx)
+            };
+            if let Ok(true) = transfer_result {
+                if expected_size > 0
+                    && fs::metadata(&destination).map(|m| m.len()).unwrap_or(0) != expected_size
+                {
+                    Err(format!(
+                        "Downloaded package size differs from Microsoft metadata ({expected_size} bytes)."
+                    ))
+                } else {
+                    let package_bytes = fs::metadata(&destination).map(|m| m.len()).unwrap_or(0);
+                    let _ = tx.send(DownloadEvent::Extracting { id, package_bytes });
+                    match extract_msixvc(
+                        &destination,
+                        &game_dir,
+                        &product_id,
+                        package_bytes,
+                        &control,
+                        &tx,
+                        id,
+                    ) {
+                        Ok(true) => {
+                            let _ = fs::remove_file(&destination);
+                            register_extracted_package(&game_dir, &control, &tx, id)
+                        }
+                        Ok(false) => Ok(false),
+                        Err(error) => Err(error),
+                    }
+                }
+            } else {
+                transfer_result
+            }
+        }
+        Err(error) => Err(error),
+    };
+    if let Err(error) = &result {
+        download_log(format!(
+            "Xbox download failed for product_id={product_id}: {error}"
+        ));
+    } else {
+        download_log(format!(
+            "Xbox download completed for product_id={product_id}"
+        ));
+    }
+    let result = match result {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("cancelled".to_owned()),
+        Err(_error) if control.get() == ControlState::Paused => {
+            download_log(format!(
+                "Xbox task {id} interrupted while paused; keeping partial data"
+            ));
+            Err("paused".to_owned())
+        }
+        Err(error) => {
+            let cleanup = remove_partial(&partial_path);
+            let _ = fs::remove_file(&destination);
+            let _ = fs::remove_dir_all(&game_dir);
+            Err(match cleanup {
+                Ok(()) => error,
+                Err(cleanup_error) => {
+                    format!("{error}; could not remove partial file: {cleanup_error}")
+                }
+            })
+        }
+    };
+    let _ = tx.send(DownloadEvent::Finished { id, result });
+}
+
+fn download_state_path() -> Option<PathBuf> {
+    std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .map(|root| root.join("UniversalDownloader").join("downloads.json"))
 }
 
 fn resolve_asset_dir(folder: &str, override_key: &str, legacy_relative: &str) -> PathBuf {

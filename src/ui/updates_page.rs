@@ -26,6 +26,18 @@ pub fn show(ui: &mut egui::Ui, library: &Library, updates: &mut UpdateCheck) {
                     updates.refresh();
                 }
             });
+            if let Some((received, total)) = updates.install_progress {
+                card.add_space(8.0);
+                let fraction = total
+                    .filter(|total| *total > 0)
+                    .map(|total| (received as f32 / total as f32).clamp(0.0, 1.0));
+                card.add(egui::ProgressBar::new(fraction.unwrap_or(0.0)).animate(fraction.is_none()));
+                let progress_text = match total.filter(|total| *total > 0) {
+                    Some(total) => format!("{}% · {:.1} / {:.1} MB", (received.saturating_mul(100) / total).min(100), received as f64 / 1_048_576.0, total as f64 / 1_048_576.0),
+                    None => format!("Downloaded {:.1} MB", received as f64 / 1_048_576.0),
+                };
+                card.label(RichText::new(progress_text).size(11.0).color(Color32::GRAY));
+            }
             if let Some(release) = &updates.release {
                 card.add_space(8.0);
                 card.label(
