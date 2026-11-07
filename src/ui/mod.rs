@@ -25,7 +25,6 @@ use std::path::PathBuf;
 pub enum Page {
     Home,
     Catalog,
-    EpicCatalog,
     Library,
     Downloads,
     Updates,
@@ -35,6 +34,7 @@ pub enum Page {
 /// Intentions émises par l'interface, traitées par `App::apply`.
 pub enum Action {
     Navigate(Page),
+    SelectCatalog(crate::model::GameStore),
     OpenGame(String),
     PrepareDownload {
         id: String,

@@ -13,28 +13,22 @@ const CARD_WIDTH: f32 = 224.0;
 pub fn show(
     ui: &mut egui::Ui,
     catalog: &mut Catalog,
+    selected_store: GameStore,
     library: &Library,
     images: &mut ImageCache,
     out: &mut Vec<Action>,
 ) {
+    catalog.refresh_visible(library);
     widgets::page_header(
         ui,
         "DISCOVER",
-        if catalog.store == GameStore::Xbox {
-            "Xbox catalog"
-        } else {
-            "Epic Games catalog"
-        },
-        if catalog.store == GameStore::Xbox {
-            "Browse Xbox games and quickly find their details."
-        } else {
-            "Browse games with a local Epic BuildPatch manifest."
-        },
+        "Game catalog",
+        "Choose a store, then browse its games.",
     );
+    store_selector(ui, selected_store, out);
+    ui.add_space(14.0);
     toolbar(ui, catalog, out);
-    genre_chips(ui, catalog);
-
-    catalog.refresh_visible(library);
+    genre_filter(ui, catalog);
     let total_pages = catalog.total_pages();
     catalog.page_index = catalog.page_index.min(total_pages - 1);
 
@@ -50,6 +44,57 @@ pub fn show(
     }
     let catalog = &*catalog;
     area.show(ui, |ui| ui.winui(|ui| grid(ui, catalog, images, out)));
+}
+
+fn store_selector(ui: &mut egui::Ui, selected: GameStore, out: &mut Vec<Action>) {
+    ui.columns(2, |columns| {
+        store_button(&mut columns[0], GameStore::Xbox, selected, out);
+        store_button(&mut columns[1], GameStore::Epic, selected, out);
+    });
+}
+
+fn store_button(ui: &mut egui::Ui, store: GameStore, selected: GameStore, out: &mut Vec<Action>) {
+    let (title, subtitle, logo) = match store {
+        GameStore::Xbox => (
+            "XBOX GAME PASS",
+            "Xbox games catalog",
+            icons::xbox_game_pass(48.0),
+        ),
+        GameStore::Epic => ("EPIC GAMES", "Epic Games catalog", icons::epic_games(48.0)),
+    };
+    let is_selected = store == selected;
+    let response = egui::Frame::new()
+        .fill(if is_selected {
+            super::theme::accent_alpha(34)
+        } else {
+            super::theme::BG_CARD
+        })
+        .stroke(egui::Stroke::new(
+            if is_selected { 1.5 } else { 1.0 },
+            if is_selected {
+                super::theme::ACCENT_LIGHT
+            } else {
+                super::theme::accent_alpha(75)
+            },
+        ))
+        .corner_radius(12)
+        .inner_margin(egui::Margin::symmetric(16, 12))
+        .show(ui, |ui| {
+            ui.set_min_height(66.0);
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.add(logo);
+                ui.add_space(10.0);
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(title).size(14.0).strong());
+                    ui.label(RichText::new(subtitle).size(11.0).color(Color32::GRAY));
+                });
+            });
+        })
+        .response;
+    if response.interact(egui::Sense::click()).clicked() {
+        out.push(Action::SelectCatalog(store));
+    }
 }
 
 fn toolbar(ui: &mut egui::Ui, catalog: &mut Catalog, out: &mut Vec<Action>) {
@@ -90,23 +135,17 @@ fn toolbar(ui: &mut egui::Ui, catalog: &mut Catalog, out: &mut Vec<Action>) {
     });
 }
 
-fn genre_chips(ui: &mut egui::Ui, catalog: &mut Catalog) {
-    if catalog.genres.is_empty() {
-        return;
-    }
-    let mut picked = None;
-    ui.horizontal_wrapped(|ui| {
-        let genres = std::iter::once(ALL_GENRES).chain(catalog.genres.iter().map(String::as_str));
-        for genre in genres {
-            let selected = catalog.genre_filter.eq_ignore_ascii_case(genre);
-            if widgets::chip(ui, genre, selected).clicked() {
-                picked = Some(genre.to_owned());
+fn genre_filter(ui: &mut egui::Ui, catalog: &mut Catalog) {
+    egui::ComboBox::from_id_salt(("genre_filter", catalog.store as u8))
+        .selected_text(format!("Category: {}", catalog.genre_filter))
+        .width(220.0)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut catalog.genre_filter, ALL_GENRES.to_owned(), ALL_GENRES);
+            for genre in &catalog.genres {
+                ui.selectable_value(&mut catalog.genre_filter, genre.clone(), genre);
             }
-        }
-    });
-    if let Some(genre) = picked {
-        catalog.genre_filter = genre;
-    }
+        });
+    ui.add_space(6.0);
 }
 
 fn pagination(ui: &mut egui::Ui, catalog: &mut Catalog, total_pages: usize) {

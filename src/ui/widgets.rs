@@ -56,20 +56,6 @@ pub fn identity(value: &'static str) -> &'static str {
     value
 }
 
-/// Puce de filtre (genres).
-pub fn chip(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
-    ui.add(
-        egui::Button::new(text)
-            .fill(if selected {
-                theme::accent_alpha(80)
-            } else {
-                theme::BG_CARD
-            })
-            .stroke(egui::Stroke::new(1.0, theme::accent_alpha(70)))
-            .corner_radius(16),
-    )
-}
-
 /// Texte sur une seule ligne, tronqué avec « … », peint sans modifier le layout.
 pub fn paint_truncated(
     painter: &egui::Painter,

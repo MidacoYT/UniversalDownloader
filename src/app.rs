@@ -24,6 +24,7 @@ pub struct App {
     page: Page,
     catalog: Catalog,
     epic_catalog: Catalog,
+    selected_catalog: GameStore,
     library: Library,
     settings: Settings,
     updates: UpdateCheck,
@@ -43,6 +44,7 @@ impl App {
             page: Page::Home,
             catalog: Catalog::new(GameStore::Xbox),
             epic_catalog: Catalog::new(GameStore::Epic),
+            selected_catalog: GameStore::Xbox,
             library: Library::new(),
             settings: Settings::load(),
             updates: UpdateCheck::new(),
@@ -121,11 +123,24 @@ impl App {
         match action {
             Action::Navigate(page) => {
                 self.page = page;
-                if page == Page::EpicCatalog
-                    && self.epic_catalog.games.is_empty()
-                    && !self.epic_catalog.is_loading()
-                {
-                    self.epic_catalog.refresh();
+                if page == Page::Catalog {
+                    let catalog = match self.selected_catalog {
+                        GameStore::Xbox => &mut self.catalog,
+                        GameStore::Epic => &mut self.epic_catalog,
+                    };
+                    if catalog.games.is_empty() && !catalog.is_loading() {
+                        catalog.refresh();
+                    }
+                }
+            }
+            Action::SelectCatalog(store) => {
+                self.selected_catalog = store;
+                let catalog = match store {
+                    GameStore::Xbox => &mut self.catalog,
+                    GameStore::Epic => &mut self.epic_catalog,
+                };
+                if catalog.games.is_empty() && !catalog.is_loading() {
+                    catalog.refresh();
                 }
             }
             Action::OpenGame(id) => {
@@ -210,16 +225,24 @@ impl App {
     fn show_page(&mut self, ui: &mut egui::Ui, out: &mut Vec<Action>) {
         match self.page {
             Page::Home => home::show(ui, &self.catalog, &self.library, &mut self.images, out),
-            Page::Catalog => {
-                catalog_page::show(ui, &mut self.catalog, &self.library, &mut self.images, out)
-            }
-            Page::EpicCatalog => catalog_page::show(
-                ui,
-                &mut self.epic_catalog,
-                &self.library,
-                &mut self.images,
-                out,
-            ),
+            Page::Catalog => match self.selected_catalog {
+                GameStore::Xbox => catalog_page::show(
+                    ui,
+                    &mut self.catalog,
+                    self.selected_catalog,
+                    &self.library,
+                    &mut self.images,
+                    out,
+                ),
+                GameStore::Epic => catalog_page::show(
+                    ui,
+                    &mut self.epic_catalog,
+                    self.selected_catalog,
+                    &self.library,
+                    &mut self.images,
+                    out,
+                ),
+            },
             Page::Library => library_page::show(
                 ui,
                 &mut self.library,

@@ -20,6 +20,8 @@ icons! {
     logo => "logo.svg",
     dashboard => "dashboard.svg",
     catalog => "catalog.svg",
+    xbox_game_pass => "xbox-game-pass.svg",
+    epic_games => "epic-games.svg",
     folder => "folder.svg",
     download => "download.svg",
     settings => "settings.svg",
