@@ -305,23 +305,7 @@ fn match_installed_game<'a>(folder: &str, titles: &[(String, &'a Game)]) -> Opti
 
 /// Lance le premier .exe du dossier (hors utilitaires `wdapp`).
 pub fn launch_game(folder: &Path, preferred_exe: Option<&str>) -> Result<(), String> {
-    let preferred = preferred_exe.map(|exe| folder.join(exe.replace('/', "\\")));
-    let executable = if let Some(path) = preferred.filter(|path| path.is_file()) {
-        path
-    } else {
-        std::fs::read_dir(folder)
-            .map_err(|e| format!("Could not read game folder: {e}"))?
-            .flatten()
-            .map(|entry| entry.path())
-            .find(|path| {
-                path.extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
-                    && !path
-                        .file_name()
-                        .is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().contains("wdapp"))
-            })
-            .ok_or_else(|| "No game executable was found in this folder.".to_owned())?
-    };
+    let executable = find_game_executable(folder, preferred_exe)?;
 
     std::process::Command::new(&executable)
         .current_dir(folder)
@@ -331,4 +315,122 @@ pub fn launch_game(folder: &Path, preferred_exe: Option<&str>) -> Result<(), Str
         .spawn()
         .map(|_| ())
         .map_err(|e| format!("Could not launch game: {e}"))
+}
+
+fn find_game_executable(folder: &Path, preferred_exe: Option<&str>) -> Result<PathBuf, String> {
+    let preferred = preferred_exe.map(|exe| folder.join(exe.replace('/', "\\")));
+    if let Some(path) = preferred.filter(|path| path.is_file()) {
+        return Ok(path);
+    }
+    std::fs::read_dir(folder)
+        .map_err(|e| format!("Could not read game folder: {e}"))?
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+                && !path
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().contains("wdapp"))
+        })
+        .ok_or_else(|| "No game executable was found in this folder.".to_owned())
+}
+
+#[cfg(windows)]
+pub fn create_desktop_shortcut(
+    name: &str,
+    folder: &Path,
+    store: crate::model::GameStore,
+    preferred_exe: Option<&str>,
+) -> Result<(), String> {
+    use std::process::{Command, Stdio};
+
+    let mut command = Command::new("powershell.exe");
+    command
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+        ])
+        .env("UD_SHORTCUT_NAME", name)
+        .env("UD_SHORTCUT_FOLDER", folder)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let script = match store {
+        crate::model::GameStore::Epic => {
+            let executable = find_game_executable(folder, preferred_exe)?;
+            command
+                .env("UD_SHORTCUT_TARGET", &executable)
+                .env("UD_SHORTCUT_WORKDIR", folder);
+            r#"
+$ErrorActionPreference = 'Stop'
+$target = $env:UD_SHORTCUT_TARGET
+$workdir = $env:UD_SHORTCUT_WORKDIR
+$arguments = ''
+$icon = $target
+"#
+        }
+        crate::model::GameStore::Xbox => {
+            command.env("UD_SHORTCUT_FOLDER", folder);
+            r#"
+$ErrorActionPreference = 'Stop'
+$root = [IO.Path]::GetFullPath($env:UD_SHORTCUT_FOLDER).TrimEnd('\')
+$package = Get-AppxPackage | Where-Object {
+    if (-not $_.InstallLocation) { return $false }
+    $location = [IO.Path]::GetFullPath($_.InstallLocation).TrimEnd('\')
+    $location.Equals($root, [StringComparison]::OrdinalIgnoreCase) -or
+        $location.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)
+} | Select-Object -First 1
+if (-not $package) { throw 'No registered Xbox game package was found in this folder.' }
+$manifest = Get-AppxPackageManifest -Package $package.PackageFullName
+$application = @($manifest.Package.Applications.Application) | Select-Object -First 1
+if (-not $application -or -not $application.Id) { throw 'The Xbox package has no launchable application.' }
+$target = Join-Path $env:WINDIR 'explorer.exe'
+$arguments = 'shell:AppsFolder\' + $package.PackageFamilyName + '!' + $application.Id
+$workdir = $root
+$icon = $target
+"#
+        }
+    };
+    let common = r#"
+$desktop = [Environment]::GetFolderPath('DesktopDirectory')
+$safeName = [regex]::Replace($env:UD_SHORTCUT_NAME, '[\x00-\x1f<>:"/\\|?*]', '_').Trim().TrimEnd('.')
+if ([string]::IsNullOrWhiteSpace($safeName)) { throw 'The game name is not valid for a shortcut.' }
+$shortcutPath = Join-Path $desktop ($safeName + '.lnk')
+$shell = New-Object -ComObject WScript.Shell
+$shortcut = $shell.CreateShortcut($shortcutPath)
+$shortcut.TargetPath = $target
+$shortcut.Arguments = $arguments
+$shortcut.WorkingDirectory = $workdir
+$shortcut.IconLocation = $icon
+$shortcut.Save()
+"#;
+    let output = command
+        .arg(format!("{script}\n{common}"))
+        .output()
+        .map_err(|error| format!("Could not start shortcut creation: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let details = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        Err(if details.is_empty() {
+            format!("PowerShell exited with {}.", output.status)
+        } else {
+            details
+        })
+    }
+}
+
+#[cfg(not(windows))]
+pub fn create_desktop_shortcut(
+    _name: &str,
+    _folder: &Path,
+    _store: crate::model::GameStore,
+    _preferred_exe: Option<&str>,
+) -> Result<(), String> {
+    Err("Desktop shortcuts are supported only on Windows.".into())
 }

@@ -285,6 +285,22 @@ impl App {
                     Err(error) => error,
                 };
             }
+            Action::CreateDesktopShortcut {
+                name,
+                path,
+                store,
+                launch_exe,
+            } => {
+                self.library.status = match library::create_desktop_shortcut(
+                    &name,
+                    &path,
+                    store,
+                    launch_exe.as_deref(),
+                ) {
+                    Ok(()) => format!("Desktop shortcut created for {name}."),
+                    Err(error) => format!("Could not create desktop shortcut: {error}"),
+                };
+            }
             Action::AskUninstall(entry) => self.pending_uninstall = Some(entry),
             Action::DismissUninstall => self.pending_uninstall = None,
             Action::ConfirmUninstall => {

@@ -68,6 +68,12 @@ pub enum Action {
         name: String,
         path: PathBuf,
     },
+    CreateDesktopShortcut {
+        name: String,
+        path: PathBuf,
+        store: crate::model::GameStore,
+        launch_exe: Option<String>,
+    },
     AskUninstall(LibraryEntry),
     ConfirmUninstall,
     DismissUninstall,
