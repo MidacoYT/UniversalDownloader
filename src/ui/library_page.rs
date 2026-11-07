@@ -118,16 +118,31 @@ fn cards(
     images: &mut ImageCache,
     out: &mut Vec<Action>,
 ) {
+    let gap = 12.0;
+    let min_card_width = 300.0;
+    let available = ui.available_width();
     let columns = match view {
-        LibraryView::Grid => ((ui.available_width() / 300.0).floor() as usize).clamp(1, 4),
+        LibraryView::Grid => (((available + gap) / (min_card_width + gap)).floor() as usize).clamp(1, 4),
         LibraryView::List => 1,
     };
+    let card_width = if view == LibraryView::Grid {
+        ((available - gap * (columns - 1) as f32) / columns as f32).max(1.0)
+    } else {
+        available
+    };
+
     for chunk in rows.chunks(columns) {
-        ui.columns(columns, |column_uis| {
-            for (column, row) in column_uis.iter_mut().zip(chunk) {
-                entry_card(column, row, view, images, out);
+        ui.horizontal_top(|row_ui| {
+            row_ui.spacing_mut().item_spacing.x = gap;
+            for row in chunk {
+                row_ui.allocate_ui_with_layout(
+                    egui::vec2(card_width, 1.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |card_ui| entry_card(card_ui, row, view, images, out),
+                );
             }
         });
+        ui.add_space(gap);
     }
 }
 
@@ -179,7 +194,7 @@ fn entry_card(
                         meta.add(egui::Label::new(widgets::muted(subtitle, 10.0)).truncate());
                     });
                     body.add_space(9.0);
-                    body.horizontal(|ui| buttons(ui, row, out));
+                    body.horizontal_wrapped(|ui| buttons(ui, row, out));
                 });
         });
     });
