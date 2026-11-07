@@ -69,8 +69,8 @@ pub fn show(
     state.trailer = state.trailer.min(game.trailers.len().saturating_sub(1));
 
     let viewport = ctx.input(|i| i.viewport_rect());
-    let width = (viewport.width() - 48.0).clamp(420.0, 820.0);
-    let height = (viewport.height() - 48.0).clamp(360.0, 650.0);
+    let width = (viewport.width() - 32.0).clamp(320.0, 1120.0);
+    let height = (viewport.height() - 32.0).clamp(320.0, 850.0);
     let rect = egui::Rect::from_center_size(viewport.center(), egui::vec2(width, height));
 
     ctx.layer_painter(egui::LayerId::new(

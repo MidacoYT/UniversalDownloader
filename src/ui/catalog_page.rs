@@ -99,6 +99,7 @@ fn render(
             grid(ui, catalog, images, selected_store, loading, out);
             ui.add_space(12.0);
             pagination(ui, catalog, total_pages);
+            ui.add_space(24.0);
         });
     });
 }

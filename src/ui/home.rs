@@ -1,5 +1,5 @@
 //! Page d'accueil : statistiques + carrousel des jeux les plus évalués.
-use super::{Action, Page, icons, theme, widgets};
+use super::{Action, Page, theme, widgets};
 use crate::catalog::Catalog;
 use crate::images::{self, ImageCache};
 use crate::library::Library;
@@ -183,23 +183,37 @@ fn top_games_row(
             top.push((*game, index));
         }
     }
-    let offset_id = egui::Id::new("home_top_games_arrow_pending");
+    let offset_id = egui::Id::new("home_top_games_arrow_target");
     let current_offset_id = egui::Id::new("home_top_games_arrow_current");
+    let animation_id = egui::Id::new("home_top_games_arrow_animation");
     let current_offset = ui
         .ctx()
         .data(|data| data.get_temp::<f32>(current_offset_id))
         .unwrap_or(0.0);
-    let pending_offset = ui.ctx().data_mut(|data| data.remove_temp::<f32>(offset_id));
+    let target_offset = ui
+        .ctx()
+        .data(|data| data.get_temp::<f32>(offset_id))
+        .unwrap_or(current_offset);
+    let animated_offset = ui
+        .ctx()
+        .animate_value_with_time(animation_id, target_offset, 0.28);
+    let sliding = (animated_offset - target_offset).abs() > 0.5;
     ui.horizontal(|ui| {
-        let left = ui.add_enabled(
-            pending_offset.unwrap_or(current_offset) > 0.0,
-            egui::Button::image(icons::chevron_left(18.0)),
-        );
+        let left = ui
+            .allocate_ui_with_layout(
+                egui::vec2(40.0, TILE_SIZE.y),
+                egui::Layout::top_down(egui::Align::Center),
+                |ui| {
+                    ui.add_space((TILE_SIZE.y - 40.0) * 0.5);
+                    carousel_arrow(ui, false, animated_offset > 0.0)
+                },
+            )
+            .inner;
         let mut area = egui::ScrollArea::horizontal()
             .id_salt("home_top_games")
             .auto_shrink([false, false]);
-        if let Some(offset) = pending_offset {
-            area = area.horizontal_scroll_offset(offset);
+        if sliding {
+            area = area.horizontal_scroll_offset(animated_offset);
         }
         let output = area.show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -218,22 +232,66 @@ fn top_games_row(
             data.insert_temp(current_offset_id, output.state.offset.x);
         });
         let max_offset = (output.content_size.x - output.inner_rect.width()).max(0.0);
-        let right = ui.add_enabled(
-            output.state.offset.x < max_offset,
-            egui::Button::image(icons::chevron_right(18.0)),
-        );
+        let right = ui
+            .allocate_ui_with_layout(
+                egui::vec2(40.0, TILE_SIZE.y),
+                egui::Layout::top_down(egui::Align::Center),
+                |ui| {
+                    ui.add_space((TILE_SIZE.y - 40.0) * 0.5);
+                    carousel_arrow(ui, true, output.state.offset.x < max_offset)
+                },
+            )
+            .inner;
         if left.clicked() || right.clicked() {
             let delta = TILE_SIZE.x * 2.0;
+            let base = target_offset.max(output.state.offset.x);
             let offset = if left.clicked() {
-                (output.state.offset.x - delta).max(0.0)
+                (base - delta).max(0.0)
             } else {
-                (output.state.offset.x + delta).min(max_offset)
+                (base + delta).min(max_offset)
             };
             ui.ctx()
                 .data_mut(|data| data.insert_temp(offset_id, offset));
-            ui.ctx().request_repaint();
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(16));
+        } else if !sliding {
+            ui.ctx().data_mut(|data| data.remove_temp::<f32>(offset_id));
         }
     });
+}
+
+fn carousel_arrow(ui: &mut egui::Ui, right: bool, enabled: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(40.0, 40.0), egui::Sense::click());
+    let hover = ui.ctx().animate_bool_with_time(
+        response.id.with("carousel-arrow-hover"),
+        enabled && response.hovered(),
+        0.14,
+    );
+    ui.painter().circle_filled(
+        rect.center(),
+        19.0,
+        if enabled {
+            theme::mix((32, 27, 48), (119, 62, 220), hover)
+        } else {
+            Color32::from_rgb(32, 30, 41)
+        },
+    );
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        if right { "›" } else { "‹" },
+        egui::FontId::proportional(27.0),
+        if enabled {
+            Color32::WHITE
+        } else {
+            Color32::from_gray(100)
+        },
+    );
+    response.on_hover_cursor(if enabled {
+        egui::CursorIcon::PointingHand
+    } else {
+        egui::CursorIcon::Default
+    })
 }
 
 /// Carte portrait d'un jeu ; retourne `true` au clic.
