@@ -62,6 +62,6 @@ Les scripts de `tools` récupèrent le manifeste BuildPatch et les données néc
      --output "epic_chunk_urls"
    ```
 
-   Le script lit les `.manifest` du dossier directement; `_resultats.csv` fournit les noms et `appName` quand il est présent. Il demande un code d’autorisation Epic avec une saisie masquée, puis récupère auprès d’Epic les informations CDN nécessaires pour former les URL. Les fichiers générés comprennent `summary.json`, un `.txt` d’URL par jeu et `chunks\<manifest>.json` avec les identifiants des chunks et leurs CDN.
+   Le script lit les `.manifest` du dossier directement; `_resultats.csv` fournit les noms et `appName` quand il est présent. Il affiche le lien Epic à ouvrir, puis demande le champ `authorizationCode` avec une saisie masquée. Il récupère ensuite auprès d’Epic les informations CDN nécessaires pour former les URL. Les fichiers générés comprennent `summary.json`, un `.txt` d’URL par jeu et `chunks\<manifest>.json` avec les identifiants des chunks et leurs CDN.
 
 4. Ouvre une issue en précisant le nom du jeu et son `appName` (indiqué dans `_resultats.csv` ou `chunks\<manifest>.json`), puis joins le `.manifest`, son entrée de `summary.json`, le JSON `chunks` correspondant et le `.txt` contenant les URL.

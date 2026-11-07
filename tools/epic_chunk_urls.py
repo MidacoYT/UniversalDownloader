@@ -37,6 +37,7 @@ USER_AGENT = "UniversalDownloader/0.1 (Epic BuildPatch URL resolver)"
 OAUTH_URL = "https://account-public-service-prod03.ol.epicgames.com/account/api/oauth/token"
 OAUTH_CLIENT_ID = "34a02cf8f4414e29b15921876da36f9a"
 OAUTH_CLIENT_SECRET = "daafbccc737745039dffe53d94fc76cf"
+AUTHORIZATION_URL = "https://www.epicgames.com/id/api/redirect"
 
 
 def exchange_authorization_code(code: str, grant_type: str) -> str:
@@ -451,8 +452,15 @@ def main() -> int:
         return 2
 
     try:
+        authorization_link = AUTHORIZATION_URL + "?" + urllib.parse.urlencode({
+            "clientId": OAUTH_CLIENT_ID,
+            "responseType": "code",
+        })
+        print("\nOuvre ce lien dans ton navigateur connecté à Epic Games :")
+        print(authorization_link)
+        print("Copie le champ authorizationCode de la réponse Epic.\n")
         code, grant_type = normalize_authorization_input(getpass.getpass(
-            "Colle le authorizationCode Epic (saisie masquée, code à usage unique) : "
+            "authorizationCode, JSON ou URL de réponse Epic : "
         ))
         if not code:
             print("No authorization code was entered.", file=sys.stderr)
