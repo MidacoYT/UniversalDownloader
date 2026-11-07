@@ -1,9 +1,17 @@
 //! Cache de textures chargées en arrière-plan + helpers de rendu des jaquettes.
+//! Les miniatures sont aussi mises en cache sur disque pour ne pas retélécharger
+//! toutes les jaquettes à chaque lancement.
 use crate::net;
 use eframe::egui::{self, Color32, CornerRadius, Rect, Vec2};
-use std::collections::{HashMap, HashSet};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex, PoisonError};
+use sha1::{Digest, Sha1};
+use std::{
+    fs,
+    path::PathBuf,
+    collections::HashMap,
+    sync::mpsc::{self, Receiver, Sender},
+    sync::{Arc, Mutex, PoisonError},
+    time::{Duration, Instant},
+};
 
 type Loaded = (String, Option<egui::ColorImage>);
 type Job = (String, String, (u32, u32), egui::Context);
@@ -11,15 +19,36 @@ type Job = (String, String, (u32, u32), egui::Context);
 /// Nombre de téléchargements d'images simultanés (évite un thread par jaquette).
 const WORKERS: usize = 6;
 
+/// Nouvelle tentative pour une jaquette en échec : 5 essais, une minute entre chacun.
+const MAX_ATTEMPTS: u32 = 5;
+const RETRY_DELAY: Duration = Duration::from_secs(60);
+
 pub fn hero_key(game_id: &str) -> String {
     format!("hero:{game_id}")
+}
+
+/// Une jaquette réseau/lecture en attente de résultat.
+#[derive(Clone)]
+struct Pending {
+    url: String,
+    max: (u32, u32),
+    attempts: u32,
+}
+
+/// Une jaquette échouée, re-tentée automatiquement à `at`.
+#[derive(Clone)]
+struct Failed {
+    url: String,
+    max: (u32, u32),
+    attempts: u32,
+    at: Instant,
 }
 
 pub struct ImageCache {
     rx: Receiver<Loaded>,
     jobs: Sender<Job>,
-    pending: HashSet<String>,
-    failed: HashSet<String>,
+    pending: HashMap<String, Pending>,
+    failed: HashMap<String, Failed>,
     textures: HashMap<String, egui::TextureHandle>,
 }
 
@@ -46,8 +75,8 @@ impl ImageCache {
         Self {
             rx,
             jobs,
-            pending: HashSet::new(),
-            failed: HashSet::new(),
+            pending: HashMap::new(),
+            failed: HashMap::new(),
             textures: HashMap::new(),
         }
     }
@@ -56,31 +85,45 @@ impl ImageCache {
         self.textures.get(key)
     }
 
-    /// Autorise une nouvelle tentative pour les images qui avaient échoué.
+    /// Autorise une nouvelle tentative immédiate pour les images qui avaient échoué.
     pub fn clear_failed(&mut self) {
         self.failed.clear();
     }
 
     /// Lance le téléchargement si l'image n'est ni chargée, ni en cours, ni en échec.
     pub fn request(&mut self, ctx: &egui::Context, key: &str, url: &str, max: (u32, u32)) {
+        self.schedule(ctx, key, url, max, 0);
+    }
+
+    fn schedule(&mut self, ctx: &egui::Context, key: &str, url: &str, max: (u32, u32), attempts: u32) {
         if url.is_empty()
             || self.textures.contains_key(key)
-            || self.failed.contains(key)
-            || !self.pending.insert(key.to_owned())
+            || self.failed.contains_key(key)
+            || self.pending.contains_key(key)
         {
             return;
         }
         let job = (key.to_owned(), url.to_owned(), max, ctx.clone());
-        if self.jobs.send(job).is_err() {
-            self.pending.remove(key);
+        if self.jobs.send(job).is_ok() {
+            self.pending.insert(
+                key.to_owned(),
+                Pending {
+                    url: url.to_owned(),
+                    max,
+                    attempts,
+                },
+            );
         }
     }
 
-    /// Intègre les images terminées (à appeler une fois par frame).
+    /// Intègre les images terminées, puis relance les échecs arrivés à échéance
+    /// (à appeler une fois par frame).
     pub fn poll(&mut self, ctx: &egui::Context) {
         let mut changed = false;
         while let Ok((key, image)) = self.rx.try_recv() {
-            self.pending.remove(&key);
+            let Some(pending) = self.pending.remove(&key) else {
+                continue;
+            };
             match image {
                 Some(image) => {
                     let texture = ctx.load_texture(
@@ -92,9 +135,33 @@ impl ImageCache {
                     changed = true;
                 }
                 None => {
-                    self.failed.insert(key);
+                    let attempts = pending.attempts + 1;
+                    if attempts < MAX_ATTEMPTS {
+                        self.failed.insert(
+                            key,
+                            Failed {
+                                url: pending.url,
+                                max: pending.max,
+                                attempts,
+                                at: Instant::now() + RETRY_DELAY,
+                            },
+                        );
+                        changed = false;
+                    }
                 }
             }
+        }
+        // Relance automatique des échecs dont le délai est écoulé.
+        let now = Instant::now();
+        let due: Vec<(String, Failed)> = self
+            .failed
+            .iter()
+            .filter(|(_, failed)| failed.at <= now)
+            .map(|(key, failed)| (key.clone(), failed.clone()))
+            .collect();
+        for (key, failed) in due {
+            self.failed.remove(&key);
+            self.schedule(ctx, &key, &failed.url, failed.max, failed.attempts);
         }
         if changed {
             ctx.request_repaint();
@@ -102,7 +169,41 @@ impl ImageCache {
     }
 }
 
+/// Dossier du cache disque des jaquettes.
+fn covers_dir() -> Option<PathBuf> {
+    let root = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
+    Some(root.join("UniversalDownloader").join("covers"))
+}
+
+/// Emplacement du fichier miniature en cache pour cette URL et taille cible.
+fn cached_path(url: &str, max: (u32, u32)) -> Option<PathBuf> {
+    let digest = Sha1::digest(url.as_bytes());
+    Some(covers_dir()?.join(format!(
+        "{digest:x}-{}x{}.jpg",
+        max.0, max.1
+    )))
+}
+
+fn to_color_image(image: &image::DynamicImage) -> egui::ColorImage {
+    let rgba = image.to_rgba8();
+    egui::ColorImage::from_rgba_unmultiplied(
+        [rgba.width() as usize, rgba.height() as usize],
+        rgba.as_raw(),
+    )
+}
+
 fn load_image(url: &str, max: (u32, u32)) -> Option<egui::ColorImage> {
+    // 1. Cache disque : de toute façon à la taille demandée (clé = URL + dimensions).
+    if let Some(path) = cached_path(url, max)
+        && let Ok(bytes) = fs::read(&path)
+        && let Ok(image) = image::load_from_memory(&bytes)
+    {
+        return Some(to_color_image(&image));
+    }
+
+    // 2. Réseau + miniature, puis écriture du cache (sans bloquer si le disque refuse).
     let bytes = net::shared_client()?
         .get(url)
         .send()
@@ -111,14 +212,14 @@ fn load_image(url: &str, max: (u32, u32)) -> Option<egui::ColorImage> {
         .ok()?
         .bytes()
         .ok()?;
-    let image = image::load_from_memory(&bytes)
-        .ok()?
-        .thumbnail(max.0, max.1)
-        .to_rgba8();
-    Some(egui::ColorImage::from_rgba_unmultiplied(
-        [image.width() as usize, image.height() as usize],
-        image.as_raw(),
-    ))
+    let thumbnail = image::load_from_memory(&bytes).ok()?.thumbnail(max.0, max.1);
+    if let Some(path) = cached_path(url, max) {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = thumbnail.save(&path);
+    }
+    Some(to_color_image(&thumbnail))
 }
 
 // ───────────────────────── Rendu ─────────────────────────

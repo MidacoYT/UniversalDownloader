@@ -30,6 +30,7 @@ pub struct UpdateCheck {
     rx: Option<Receiver<Result<Option<ReleaseInfo>, String>>>,
     install_rx: Option<Receiver<InstallEvent>>,
     pub install_progress: Option<(u64, Option<u64>)>,
+    restart_requested: bool,
 }
 
 enum InstallEvent {
@@ -45,6 +46,7 @@ impl UpdateCheck {
             rx: None,
             install_rx: None,
             install_progress: None,
+            restart_requested: false,
         };
         state.refresh();
         state
@@ -143,6 +145,10 @@ impl UpdateCheck {
         self.rx.is_some() || self.install_rx.is_some()
     }
 
+    pub fn take_restart_requested(&mut self) -> bool {
+        std::mem::take(&mut self.restart_requested)
+    }
+
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
         if let Some(rx) = self.install_rx.take() {
@@ -161,9 +167,9 @@ impl UpdateCheck {
                         changed = true;
                     }
                     Ok(InstallEvent::Finished(Ok(()))) => {
-                        self.status =
-                            "The installer is running and will restart the app when ready.".into();
+                        self.status = "Restarting Universal Downloader to install the update…".into();
                         self.install_progress = None;
+                        self.restart_requested = true;
                         finished = true;
                         changed = true;
                         break;
@@ -316,26 +322,63 @@ fn download_and_launch_installer(
     }
     drop(file);
 
-    let mut child = Command::new(&installer_path)
-        .args([
-            "/VERYSILENT",
-            "/SUPPRESSMSGBOXES",
-            "/NORESTART",
-            "/CLOSEAPPLICATIONS",
-            "/RESTARTAPPLICATIONS",
-        ])
-        .spawn()
-        .map_err(|error| {
-            let _ = fs::remove_file(&installer_path);
-            error.to_string()
-        })?;
-    std::thread::spawn(move || {
-        let _ = child.wait();
-        let _ = fs::remove_file(installer_path);
-    });
+    // Portable copies (not under Program Files) have no installed app to relaunch:
+    // keep the installer around and ask the user to run it manually.
+    if !is_installed_app() {
+        return Err(format!(
+            "Universal Downloader is running as a portable copy: run the installer saved at {} manually.",
+            installer_path.display()
+        ));
+    }
+    let app_path = std::env::current_exe()
+        .map_err(|error| format!("could not find the installed app to restart: {error}"))?;
+    let helper = r#"
+$ErrorActionPreference = 'Continue'
+$parentId = [int]$env:UD_UPDATE_PARENT_PID
+try { Wait-Process -Id $parentId -ErrorAction SilentlyContinue } catch {}
+$installer = $env:UD_UPDATE_INSTALLER
+$app = $env:UD_UPDATE_APP
+try {
+    # /NORESTART: this helper performs the restart itself so the app starts exactly once.
+    Start-Process -FilePath $installer -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS' -Wait -PassThru | Out-Null
+} catch {}
+if (Test-Path -LiteralPath $app) {
+    try { Start-Process -FilePath $app } catch {}
+}
+Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
+"#;
+    let mut command = Command::new("powershell.exe");
+    command
+        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", helper])
+        .env("UD_UPDATE_PARENT_PID", std::process::id().to_string())
+        .env("UD_UPDATE_INSTALLER", &installer_path)
+        .env("UD_UPDATE_APP", &app_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    if let Err(error) = command.spawn() {
+        let _ = fs::remove_file(&installer_path);
+        return Err(format!("could not start the hidden update/restart helper: {error}"));
+    }
     Ok(())
 }
 
+
+/// True when the current executable lives under Program Files (Inno Setup install).
+/// A debug build or a manually moved copy is treated as portable.
+fn is_installed_app() -> bool {
+    let Ok(exe) = std::env::current_exe() else { return false };
+    let exe = exe.canonicalize().unwrap_or(exe);
+    ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"]
+        .iter()
+        .filter_map(|variable| std::env::var(variable).ok())
+        .any(|dir| exe.starts_with(std::path::PathBuf::from(dir)))
+}
 fn is_newer(latest: &str, current: &str) -> bool {
     let parse = |version: &str| {
         version

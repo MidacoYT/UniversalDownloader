@@ -20,3 +20,10 @@ pub fn shared_client() -> Option<reqwest::blocking::Client> {
     static CLIENT: OnceLock<Option<reqwest::blocking::Client>> = OnceLock::new();
     CLIENT.get_or_init(|| client(12).ok()).clone()
 }
+
+/// Client réutilisé pour le chargement du catalogue : JSON volumineux + enrichissement
+/// de nombreux jeux, il mérite un délai généreux et son propre pool de connexions.
+pub fn shared_catalog_client() -> Option<reqwest::blocking::Client> {
+    static CLIENT: OnceLock<Option<reqwest::blocking::Client>> = OnceLock::new();
+    CLIENT.get_or_init(|| client(60).ok()).clone()
+}

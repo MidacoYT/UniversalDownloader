@@ -22,12 +22,9 @@ pub fn spawn_refresh(tx: Sender<CatalogEvent>, store: GameStore) {
 }
 
 fn run(tx: Sender<CatalogEvent>, store: GameStore) {
-    let client = match net::client(20) {
-        Ok(client) => client,
-        Err(error) => {
-            let _ = tx.send(CatalogEvent::Done(Err(error.to_string())));
-            return;
-        }
+    let Some(client) = net::shared_catalog_client() else {
+        let _ = tx.send(CatalogEvent::Done(Err("HTTP client unavailable.".into())));
+        return;
     };
     let result = match store {
         GameStore::Xbox => download_catalog(&client),

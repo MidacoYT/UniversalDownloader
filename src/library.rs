@@ -1,9 +1,10 @@
-//! Bibliothèque locale : scan des dossiers, association au catalogue, lancement, désinstallation.
+//! Local library: folder scan, catalog matching, launch, uninstall.
 use crate::model::Game;
 use crate::util::{GIB, normalize_title};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::{Mutex, OnceLock};
 
 fn hide_child_console(command: &mut std::process::Command) {
     #[cfg(windows)]
@@ -11,6 +12,71 @@ fn hide_child_console(command: &mut std::process::Command) {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000);
     }
+}
+
+/// Windows' effective desktop folder (`DesktopDirectory`), corrected asynchronously by a
+/// background PowerShell lookup (so OneDrive-redirected desktops are right after a moment).
+/// The synchronous fallback is the plain `%USERPROFILE%\Desktop` path.
+static DESKTOP_HINT: Mutex<OnceLock<String>> = Mutex::new(OnceLock::new());
+static RESOLVED_HINT: OnceLock<String> = OnceLock::new();
+static FALLBACK_HINT: OnceLock<String> = OnceLock::new();
+
+/// Path used in tooltips/messages while the exact Windows lookup has not finished.
+pub fn desktop_hint() -> &'static str {
+    let resolved = DESKTOP_HINT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get()
+        .cloned();
+    if let Some(path) = resolved {
+        return RESOLVED_HINT.get_or_init(|| path);
+    }
+    // Do not poison the OnceLock behind the mutex with the fallback: keep it for the
+    // asynchronous result, which will win on every later call.
+    FALLBACK_HINT.get_or_init(|| {
+        std::env::var_os("USERPROFILE")
+            .map(|profile| PathBuf::from(profile).join("Desktop"))
+            .unwrap_or_default()
+            .display()
+            .to_string()
+    })
+}
+
+/// Requests (once) the real Windows Desktop folder in a background thread.
+pub fn start_desktop_lookup() {
+    if RESOLVED_HINT.get().is_some() {
+        return;
+    }
+    let lookup = DESKTOP_HINT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if lookup.get().is_some() {
+        return;
+    }
+    drop(lookup);
+    std::thread::spawn(|| {
+        let mut command = std::process::Command::new("powershell.exe");
+        command.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            "[Environment]::GetFolderPath('DesktopDirectory')",
+        ]);
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        hide_child_console(&mut command);
+        if let Ok(output) = command.output() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            if !path.is_empty() {
+                let lookup = DESKTOP_HINT
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _ = lookup.set(path);
+            }
+        }
+    });
 }
 
 #[derive(Clone)]
@@ -70,6 +136,7 @@ pub struct Library {
 
 impl Library {
     pub fn new() -> Self {
+        start_desktop_lookup();
         Self {
             entries: Vec::new(),
             search: String::new(),
@@ -352,7 +419,7 @@ pub fn create_desktop_shortcut(
     folder: &Path,
     store: crate::model::GameStore,
     preferred_exe: Option<&str>,
-) -> Result<(), String> {
+) -> Result<PathBuf, String> {
     use std::process::{Command, Stdio};
 
     let mut command = Command::new("powershell.exe");
@@ -415,6 +482,8 @@ $icon = $target
     };
     let common = r#"
 $desktop = [Environment]::GetFolderPath('DesktopDirectory')
+if ([string]::IsNullOrWhiteSpace($desktop)) { throw 'Windows did not provide the current user desktop path.' }
+New-Item -ItemType Directory -Path $desktop -Force | Out-Null
 $safeName = [regex]::Replace($env:UD_SHORTCUT_NAME, '[\x00-\x1f<>:"/\\|?*]', '_').Trim().TrimEnd('.')
 if ([string]::IsNullOrWhiteSpace($safeName)) { throw 'The game name is not valid for a shortcut.' }
 $shortcutPath = Join-Path $desktop ($safeName + '.lnk')
@@ -425,13 +494,25 @@ $shortcut.Arguments = $arguments
 $shortcut.WorkingDirectory = $workdir
 $shortcut.IconLocation = $icon
 $shortcut.Save()
+if (-not (Test-Path -LiteralPath $shortcutPath -PathType Leaf)) { throw 'Windows did not create the desktop shortcut file.' }
+$shortcutPath
 "#;
     let output = command
         .arg(format!("{script}\n{common}"))
         .output()
         .map_err(|error| format!("Could not start shortcut creation: {error}"))?;
     if output.status.success() {
-        Ok(())
+        let shortcut_path = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(PathBuf::from)
+            .ok_or("Windows did not report where it created the shortcut.")?;
+        if shortcut_path.is_file() {
+            Ok(shortcut_path)
+        } else {
+            Err(format!("The desktop shortcut was not found at {}.", shortcut_path.display()))
+        }
     } else {
         let details = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         Err(if details.is_empty() {
@@ -448,6 +529,6 @@ pub fn create_desktop_shortcut(
     _folder: &Path,
     _store: crate::model::GameStore,
     _preferred_exe: Option<&str>,
-) -> Result<(), String> {
+) -> Result<PathBuf, String> {
     Err("Desktop shortcuts are supported only on Windows.".into())
 }

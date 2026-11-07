@@ -16,7 +16,7 @@ use eframe::egui;
 use fluent_egui::winui::prelude::*;
 use fluent_egui::winui::{self, BackdropKind, FluentTheme};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const SIDEBAR_W: f32 = 232.0;
 const MAIN_MARGIN: f32 = 28.0;
@@ -40,6 +40,8 @@ pub struct App {
     pending_uninstall: Option<LibraryEntry>,
     trailer: TrailerPlayer,
     backdrop_applied: bool,
+    /// Date du dernier scan bibliothèque : déclenche le debounce du changement d'onglet.
+    last_library_scan: Instant,
 }
 
 impl App {
@@ -64,6 +66,7 @@ impl App {
             pending_uninstall: None,
             trailer: TrailerPlayer::new(),
             backdrop_applied: false,
+            last_library_scan: Instant::now(),
         };
         app.catalog.refresh();
         app.epic_catalog.refresh();
@@ -75,6 +78,7 @@ impl App {
 
     fn scan_library(&mut self) {
         self.settings.persist();
+        self.last_library_scan = Instant::now();
         self.library.scan(&self.settings.library_dir);
     }
 
@@ -115,6 +119,9 @@ impl App {
         }
         let library_changed = self.library.poll();
         self.updates.poll();
+        if self.updates.take_restart_requested() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         let completed_before = self
             .downloads
             .entries
@@ -157,7 +164,18 @@ impl App {
     fn apply(&mut self, action: Action) {
         match action {
             Action::Navigate(page) => {
-                self.page = page;
+                if self.page != page {
+                    self.page = page;
+                    // Un onglet peut cacher des changements faits hors de l'app
+                    // (installation manuelle, suppression de dossier) : on rescanne
+                    // la bibliothèque et on retente la reprise des téléchargements Epic.
+                    // Débounce : pas de scan si le dernier date de moins de 3 s.
+                    if self.last_library_scan.elapsed() > Duration::from_secs(3) {
+                        self.scan_library();
+                    }
+                    self.downloads
+                        .resume_restored_epic(&self.epic_catalog.games);
+                }
                 if page == Page::Catalog {
                     match self.selected_catalog {
                         CatalogSelection::Xbox => {
@@ -309,7 +327,7 @@ impl App {
                     store,
                     launch_exe.as_deref(),
                 ) {
-                    Ok(()) => format!("Desktop shortcut created for {name}."),
+                    Ok(path) => format!("Desktop shortcut created: {}", path.display()),
                     Err(error) => format!("Could not create desktop shortcut: {error}"),
                 };
             }

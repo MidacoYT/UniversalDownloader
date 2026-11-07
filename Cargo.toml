@@ -19,3 +19,8 @@ rfd = { version = "0.15", default-features = false, features = ["common-controls
 
 [build-dependencies]
 winres = "0.1.12"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
