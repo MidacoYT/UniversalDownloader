@@ -321,7 +321,7 @@ impl App {
                 store,
                 launch_exe,
             } => {
-                self.library.status = match library::create_desktop_shortcut(
+                self.library.status = match library::create_shortcut(
                     &name,
                     &path,
                     store,

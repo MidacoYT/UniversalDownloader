@@ -14,14 +14,10 @@ fn hide_child_console(command: &mut std::process::Command) {
     }
 }
 
-/// Windows' effective desktop folder (`DesktopDirectory`), corrected asynchronously by a
-/// background PowerShell lookup (so OneDrive-redirected desktops are right after a moment).
-/// The synchronous fallback is the plain `%USERPROFILE%\Desktop` path.
 static DESKTOP_HINT: Mutex<OnceLock<String>> = Mutex::new(OnceLock::new());
 static RESOLVED_HINT: OnceLock<String> = OnceLock::new();
 static FALLBACK_HINT: OnceLock<String> = OnceLock::new();
 
-/// Path used in tooltips/messages while the exact Windows lookup has not finished.
 pub fn desktop_hint() -> &'static str {
     let resolved = DESKTOP_HINT
         .lock()
@@ -31,8 +27,6 @@ pub fn desktop_hint() -> &'static str {
     if let Some(path) = resolved {
         return RESOLVED_HINT.get_or_init(|| path);
     }
-    // Do not poison the OnceLock behind the mutex with the fallback: keep it for the
-    // asynchronous result, which will win on every later call.
     FALLBACK_HINT.get_or_init(|| {
         std::env::var_os("USERPROFILE")
             .map(|profile| PathBuf::from(profile).join("Desktop"))
@@ -413,8 +407,7 @@ fn find_game_executable(folder: &Path, preferred_exe: Option<&str>) -> Result<Pa
         .ok_or_else(|| "No game executable was found in this folder.".to_owned())
 }
 
-#[cfg(windows)]
-pub fn create_desktop_shortcut(
+pub fn create_shortcut(
     name: &str,
     folder: &Path,
     store: crate::model::GameStore,
@@ -453,6 +446,13 @@ $icon = $target
 "#
         }
         crate::model::GameStore::Xbox => {
+            let manifest_path = folder.join("appxmanifest.xml");
+            if !manifest_path.is_file() {
+                return Err(format!(
+                    "The Xbox package manifest was not found in {}.",
+                    folder.display()
+                ));
+            }
             command
                 .env("UD_SHORTCUT_FOLDER", folder)
                 .env("UD_SHORTCUT_EXECUTABLE", preferred_exe.unwrap_or_default());
@@ -460,19 +460,19 @@ $icon = $target
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath($env:UD_SHORTCUT_FOLDER).TrimEnd('\')
 $manifestPath = Join-Path $root 'appxmanifest.xml'
-if (-not (Test-Path -LiteralPath $manifestPath)) { throw 'appxmanifest.xml was not found in the Xbox game folder.' }
 [xml]$manifest = Get-Content -LiteralPath $manifestPath -Raw
 $identity = $manifest.SelectSingleNode("//*[local-name()='Identity']")
 if (-not $identity) { throw 'The Xbox app manifest has no package identity.' }
-$package = Get-AppxPackage -Name $identity.GetAttribute('Name') | Select-Object -First 1
-if (-not $package) { throw 'No registered Xbox package matches this game manifest.' }
+$packageName = $identity.GetAttribute('Name')
+$package = Get-AppxPackage -Name $packageName | Select-Object -First 1
+if (-not $package) { throw 'No registered Windows package matches this game manifest.' }
 $applications = @($manifest.SelectNodes("//*[local-name()='Application']"))
 if ($env:UD_SHORTCUT_EXECUTABLE) {
     $preferred = [IO.Path]::GetFileName($env:UD_SHORTCUT_EXECUTABLE)
     $application = $applications | Where-Object { [IO.Path]::GetFileName($_.GetAttribute('Executable')) -ieq $preferred } | Select-Object -First 1
 }
 if (-not $application) { $application = $applications | Select-Object -First 1 }
-if (-not $application -or -not $application.GetAttribute('Id')) { throw 'The Xbox package has no launchable application.' }
+if (-not $application -or -not $application.GetAttribute('Id')) { throw 'The Windows package has no launchable application.' }
 $target = Join-Path $env:WINDIR 'explorer.exe'
 $arguments = 'shell:AppsFolder\' + $package.PackageFamilyName + '!' + $application.GetAttribute('Id')
 $workdir = $root
@@ -524,7 +524,7 @@ $shortcutPath
 }
 
 #[cfg(not(windows))]
-pub fn create_desktop_shortcut(
+pub fn create_shortcut(
     _name: &str,
     _folder: &Path,
     _store: crate::model::GameStore,
