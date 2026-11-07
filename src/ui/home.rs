@@ -202,11 +202,8 @@ fn top_games_row(
         let left = ui
             .allocate_ui_with_layout(
                 egui::vec2(40.0, TILE_SIZE.y),
-                egui::Layout::top_down(egui::Align::Center),
-                |ui| {
-                    ui.add_space((TILE_SIZE.y - 40.0) * 0.5);
-                    carousel_arrow(ui, false, animated_offset > 0.0)
-                },
+                egui::Layout::centered_and_justified(egui::Direction::TopDown),
+                |ui| carousel_arrow(ui, false, animated_offset > 0.0),
             )
             .inner;
         ui.add_space(6.0);
@@ -244,11 +241,8 @@ fn top_games_row(
         let right = ui
             .allocate_ui_with_layout(
                 egui::vec2(40.0, TILE_SIZE.y),
-                egui::Layout::top_down(egui::Align::Center),
-                |ui| {
-                    ui.add_space((TILE_SIZE.y - 40.0) * 0.5);
-                    carousel_arrow(ui, true, output.state.offset.x < max_offset)
-                },
+                egui::Layout::centered_and_justified(egui::Direction::TopDown),
+                |ui| carousel_arrow(ui, true, output.state.offset.x < max_offset),
             )
             .inner;
         if left.clicked() || right.clicked() {
