@@ -468,18 +468,36 @@ fn genres(ui: &mut egui::Ui, game: &Game) {
     ui.add_space(18.0);
     ui.horizontal_wrapped(|ui| {
         for genre in &game.genres {
-            egui::Frame::new()
-                .fill(theme::accent_alpha(48))
-                .stroke(egui::Stroke::new(1.0, theme::accent_alpha(78)))
-                .corner_radius(20)
-                .inner_margin(egui::Margin::symmetric(10, 5))
-                .show(ui, |ui| {
-                    ui.label(
-                        RichText::new(genre)
-                            .size(11.0)
-                            .color(Color32::from_rgb(196, 181, 253)),
-                    );
-                });
+            let text = RichText::new(genre)
+                .size(11.0)
+                .color(Color32::from_rgb(196, 181, 253));
+            let text_size = ui.fonts_mut(|fonts| {
+                fonts
+                    .layout_no_wrap(
+                        genre.clone(),
+                        egui::FontId::proportional(11.0),
+                        Color32::from_rgb(196, 181, 253),
+                    )
+                    .size()
+            });
+            let pill_width = (text_size.x + 21.0).min(ui.available_width());
+            ui.allocate_ui_with_layout(
+                egui::vec2(pill_width, 28.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |pill| {
+                    egui::Frame::new()
+                        .fill(theme::accent_alpha(48))
+                        .stroke(egui::Stroke::new(1.0, theme::accent_alpha(78)))
+                        .corner_radius(20)
+                        .inner_margin(egui::Margin::symmetric(10, 5))
+                        .show(pill, |content| {
+                            content.add_sized(
+                                [text_size.x, 16.0],
+                                egui::Label::new(text).truncate(),
+                            );
+                        });
+                },
+            );
         }
     });
 }
