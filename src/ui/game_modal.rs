@@ -463,10 +463,13 @@ fn genres(ui: &mut egui::Ui, game: &Game) {
                 .corner_radius(20)
                 .inner_margin(egui::Margin::symmetric(10, 5))
                 .show(ui, |ui| {
-                    ui.label(
-                        RichText::new(genre)
-                            .size(11.0)
-                            .color(Color32::from_rgb(196, 181, 253)),
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(genre)
+                                .size(11.0)
+                                .color(Color32::from_rgb(196, 181, 253)),
+                        )
+                        .truncate(),
                     );
                 });
         }
@@ -741,51 +744,30 @@ fn feature_box(ui: &mut egui::Ui, group: FeatureGroup, entries: &[&GameAttribute
 
 fn footer(ui: &mut egui::Ui, game: &Game, out: &mut Vec<Action>) {
     ui.add_space(18.0);
-    ui.horizontal(|ui| {
-        match game.store {
-            GameStore::Xbox => {
-                if ui.add(FluentButton::accent("Download")).clicked() {
-                    out.push(Action::PrepareDownload {
-                        id: game.id.clone(),
-                        name: game.display_name().to_owned(),
-                        store: game.store,
-                    });
-                }
-                if ui.add(FluentButton::accent("Open in Xbox")).clicked() {
-                    open_store_page(&game.id);
-                }
+    ui.horizontal(|ui| match game.store {
+        GameStore::Xbox => {
+            if ui.add(FluentButton::accent("Download")).clicked() {
+                out.push(Action::PrepareDownload {
+                    id: game.id.clone(),
+                    name: game.display_name().to_owned(),
+                    store: game.store,
+                });
             }
-            GameStore::Epic => {
-                if ui.add(FluentButton::accent("Download")).clicked() {
-                    out.push(Action::PrepareDownload {
-                        id: game.id.clone(),
-                        name: game.display_name().to_owned(),
-                        store: game.store,
-                    });
-                }
-                if !game.egdata_url.is_empty() && ui.button("More game info").clicked() {
-                    let _ = webbrowser::open(&game.egdata_url);
-                }
-                if !game.manifest_url.is_empty() && ui.button("Copy manifest URL").clicked() {
-                    ui.ctx().copy_text(format!(
-                        "{}{}",
-                        crate::catalog::EPIC_API_BASE,
-                        game.manifest_url
-                    ));
-                    out.push(Action::EpicCatalogStatus(
-                        "Epic manifest URL copied.".into(),
-                    ));
-                }
+            if ui.add(FluentButton::accent("Open in Xbox")).clicked() {
+                open_store_page(&game.id);
             }
         }
-        if ui.button("Copy ID").clicked() {
-            ui.ctx().copy_text(game.id.clone());
-            out.push(match game.store {
-                GameStore::Xbox => Action::CatalogStatus("ID copied to clipboard.".into()),
-                GameStore::Epic => {
-                    Action::EpicCatalogStatus("Epic appName copied to clipboard.".into())
-                }
-            });
+        GameStore::Epic => {
+            if ui.add(FluentButton::accent("Download")).clicked() {
+                out.push(Action::PrepareDownload {
+                    id: game.id.clone(),
+                    name: game.display_name().to_owned(),
+                    store: game.store,
+                });
+            }
+            if !game.egdata_url.is_empty() && ui.button("More game info").clicked() {
+                let _ = webbrowser::open(&game.egdata_url);
+            }
         }
     });
 }

@@ -54,8 +54,6 @@ pub enum Action {
     RefreshEpicCatalog,
     ResetCatalogFilters,
     ResetEpicCatalogFilters,
-    CatalogStatus(String),
-    EpicCatalogStatus(String),
     ScanLibrary,
     PlayGame {
         name: String,

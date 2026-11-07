@@ -171,7 +171,8 @@ pub fn parse_epic_catalog(data: &Value) -> Result<Vec<Game>, String> {
             game.last_modified = version.to_owned();
         }
         if let Some(release) = item.get("releaseDate").and_then(Value::as_str) {
-            game.release = release.to_owned();
+            game.release_date_sort = release.to_owned();
+            game.release = format_date(release);
         }
         // Epic tags identify broad player modes, but not player limits or a
         // live concurrent-player count.

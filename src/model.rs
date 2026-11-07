@@ -28,6 +28,7 @@ pub struct Game {
     pub launch_exe: String,
     pub egdata_url: String,
     pub release: String,
+    pub release_date_sort: String,
     pub date_added: String,
     pub size: String,
     pub description: String,

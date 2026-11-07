@@ -239,9 +239,7 @@ impl App {
                 self.epic_catalog.refresh();
             }
             Action::ResetCatalogFilters => self.catalog.reset_filters(),
-            Action::CatalogStatus(text) => self.catalog.status = text,
             Action::ResetEpicCatalogFilters => self.epic_catalog.reset_filters(),
-            Action::EpicCatalogStatus(text) => self.epic_catalog.status = text,
             Action::ScanLibrary => self.scan_library(),
             Action::PlayGame { name, path } => {
                 let epic_exe = self

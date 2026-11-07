@@ -1,5 +1,5 @@
 //! Page d'accueil : statistiques + carrousel des jeux les plus évalués.
-use super::{Action, Page, theme, widgets};
+use super::{Action, Page, icons, theme, widgets};
 use crate::catalog::Catalog;
 use crate::images::{self, ImageCache};
 use crate::library::Library;
@@ -168,7 +168,11 @@ fn top_games_row(
     // the manifest feed, so show its newest known releases without implying a rank.
     let xbox = catalog.top_games(5);
     let mut epic: Vec<_> = epic_catalog.games.iter().collect();
-    epic.sort_by(|a, b| b.release.cmp(&a.release).then_with(|| a.name.cmp(&b.name)));
+    epic.sort_by(|a, b| {
+        b.release_date_sort
+            .cmp(&a.release_date_sort)
+            .then_with(|| a.name.cmp(&b.name))
+    });
     epic.truncate(5);
     let mut top = Vec::new();
     for index in 0..5 {
@@ -179,10 +183,25 @@ fn top_games_row(
             top.push((*game, index));
         }
     }
-    egui::ScrollArea::horizontal()
-        .id_salt("home_top_games")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
+    let offset_id = egui::Id::new("home_top_games_arrow_pending");
+    let current_offset_id = egui::Id::new("home_top_games_arrow_current");
+    let current_offset = ui
+        .ctx()
+        .data(|data| data.get_temp::<f32>(current_offset_id))
+        .unwrap_or(0.0);
+    let pending_offset = ui.ctx().data_mut(|data| data.remove_temp::<f32>(offset_id));
+    ui.horizontal(|ui| {
+        let left = ui.add_enabled(
+            pending_offset.unwrap_or(current_offset) > 0.0,
+            egui::Button::image(icons::chevron_left(18.0)),
+        );
+        let mut area = egui::ScrollArea::horizontal()
+            .id_salt("home_top_games")
+            .auto_shrink([false, false]);
+        if let Some(offset) = pending_offset {
+            area = area.horizontal_scroll_offset(offset);
+        }
+        let output = area.show(ui, |ui| {
             ui.horizontal(|ui| {
                 for (game, rank) in top.iter() {
                     images.request(ui.ctx(), &game.id, &game.image, (480, 480));
@@ -195,6 +214,26 @@ fn top_games_row(
                 }
             });
         });
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(current_offset_id, output.state.offset.x);
+        });
+        let max_offset = (output.content_size.x - output.inner_rect.width()).max(0.0);
+        let right = ui.add_enabled(
+            output.state.offset.x < max_offset,
+            egui::Button::image(icons::chevron_right(18.0)),
+        );
+        if left.clicked() || right.clicked() {
+            let delta = TILE_SIZE.x * 2.0;
+            let offset = if left.clicked() {
+                (output.state.offset.x - delta).max(0.0)
+            } else {
+                (output.state.offset.x + delta).min(max_offset)
+            };
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(offset_id, offset));
+            ui.ctx().request_repaint();
+        }
+    });
 }
 
 /// Carte portrait d'un jeu ; retourne `true` au clic.
