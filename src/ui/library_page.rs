@@ -189,12 +189,16 @@ fn entry_card(
                         meta.label(widgets::muted(format!("{:.1} GB", row.entry.bytes as f64 / GIB), 11.0));
                     });
                     body.add_space(3.0);
-                    body.horizontal(|meta| {
-                        meta.add(icons::folder(13.0));
-                        meta.add(egui::Label::new(widgets::muted(subtitle, 10.0)).truncate());
-                    });
+                    body.allocate_ui_with_layout(
+                        egui::vec2(body.available_width(), 18.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |meta| {
+                            meta.add(icons::folder(13.0));
+                            meta.add(egui::Label::new(widgets::muted(subtitle, 10.0)).truncate());
+                        },
+                    );
                     body.add_space(9.0);
-                    body.horizontal_wrapped(|ui| buttons(ui, row, out));
+                    body.horizontal(|ui| buttons(ui, row, out));
                 });
         });
     });
@@ -203,7 +207,8 @@ fn entry_card(
 fn buttons(ui: &mut egui::Ui, row: &LibraryRow, out: &mut Vec<Action>) {
     let entry = row.entry;
     if ui
-        .add(egui::Button::image_and_text(icons::play(14.0), "Play"))
+        .add(egui::Button::image(icons::play(15.0)).min_size(egui::vec2(34.0, 30.0)))
+        .on_hover_text("Play")
         .clicked()
     {
         out.push(Action::PlayGame {
@@ -212,7 +217,11 @@ fn buttons(ui: &mut egui::Ui, row: &LibraryRow, out: &mut Vec<Action>) {
         });
     }
     if let Some(game) = row.game {
-        if ui.button("View details").clicked() {
+        if ui
+            .add(egui::Button::image(icons::info(15.0)).min_size(egui::vec2(34.0, 30.0)))
+            .on_hover_text("View details")
+            .clicked()
+        {
             out.push(Action::Navigate(Page::Catalog));
             out.push(Action::OpenGame {
                 id: game.id.clone(),
@@ -220,10 +229,16 @@ fn buttons(ui: &mut egui::Ui, row: &LibraryRow, out: &mut Vec<Action>) {
             });
         }
     }
-    if ui.button("Open folder").clicked() {
+    if ui
+        .add(egui::Button::image(icons::folder(15.0)).min_size(egui::vec2(34.0, 30.0)))
+        .on_hover_text("Open folder")
+        .clicked()
+    {
         open_folder(&entry.path);
     }
-    let uninstall = egui::Button::image(icons::trash(14.0)).fill(theme::DANGER_DARK);
+    let uninstall = egui::Button::image(icons::trash(14.0))
+        .min_size(egui::vec2(34.0, 30.0))
+        .fill(theme::DANGER_DARK);
     if ui.add(uninstall).on_hover_text("Uninstall").clicked() {
         out.push(Action::AskUninstall(entry.clone()));
     }

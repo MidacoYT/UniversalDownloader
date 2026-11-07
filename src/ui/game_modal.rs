@@ -392,8 +392,14 @@ fn info_cards(ui: &mut egui::Ui, game: &Game) {
     if !game.platform.is_empty() {
         right.push(("Platforms", game.platform.as_str()));
     }
-    ui.columns(2, |columns| {
-        info_card(&mut columns[0], &{
+    let gap = 10.0;
+    let column_width = ((ui.available_width() - gap) * 0.5).max(1.0);
+    ui.horizontal(|row| {
+        row.spacing_mut().item_spacing.x = gap;
+        row.allocate_ui_with_layout(
+            egui::vec2(column_width, 1.0),
+            egui::Layout::top_down(egui::Align::Min),
+            |column| info_card(column, &{
             let mut rows = vec![
                 ("Publisher", game.publisher.as_str()),
                 ("Developer", game.developer.as_str()),
@@ -402,8 +408,13 @@ fn info_cards(ui: &mut egui::Ui, game: &Game) {
                 rows.push(("Critic sentiment", recommendation));
             }
             rows
-        });
-        info_card(&mut columns[1], &right);
+        }),
+        );
+        row.allocate_ui_with_layout(
+            egui::vec2(column_width, 1.0),
+            egui::Layout::top_down(egui::Align::Min),
+            |column| info_card(column, &right),
+        );
     });
 }
 
@@ -414,7 +425,7 @@ fn info_card(ui: &mut egui::Ui, rows: &[(&str, &str)]) {
         .corner_radius(8)
         .inner_margin(egui::Margin::same(12))
         .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
+            ui.set_width(ui.available_width());
             for (index, (label, value)) in rows.iter().enumerate() {
                 if index > 0 {
                     ui.add_space(12.0);
@@ -463,14 +474,17 @@ fn genres(ui: &mut egui::Ui, game: &Game) {
                 .corner_radius(20)
                 .inner_margin(egui::Margin::symmetric(10, 5))
                 .show(ui, |ui| {
-                    ui.add(
-                        egui::Label::new(
+                    ui.set_max_width(ui.available_width());
+                    ui.horizontal(|pill| {
+                        pill.add(
+                            egui::Label::new(
                             RichText::new(genre)
                                 .size(11.0)
                                 .color(Color32::from_rgb(196, 181, 253)),
                         )
                         .truncate(),
-                    );
+                        );
+                    });
                 });
         }
     });
