@@ -3,6 +3,7 @@ use super::{Action, game_card, icons, widgets};
 use crate::catalog::{ALL_GENRES, Catalog, CatalogSort, InstalledFilter, PLATFORMS};
 use crate::images::ImageCache;
 use crate::library::Library;
+use crate::model::GameStore;
 use eframe::egui::{self, Color32, RichText};
 use fluent_egui::winui::prelude::*;
 
@@ -19,8 +20,16 @@ pub fn show(
     widgets::page_header(
         ui,
         "DISCOVER",
-        "Game catalog",
-        "Browse games and quickly find their details.",
+        if catalog.store == GameStore::Xbox {
+            "Xbox catalog"
+        } else {
+            "Epic Games catalog"
+        },
+        if catalog.store == GameStore::Xbox {
+            "Browse Xbox games and quickly find their details."
+        } else {
+            "Browse games with a local Epic BuildPatch manifest."
+        },
     );
     toolbar(ui, catalog, out);
     genre_chips(ui, catalog);
@@ -73,7 +82,10 @@ fn toolbar(ui: &mut egui::Ui, catalog: &mut Catalog, out: &mut Vec<Action>) {
             .add_enabled(!catalog.is_loading(), egui::Button::new("Refresh"))
             .clicked()
         {
-            out.push(Action::RefreshCatalog);
+            out.push(match catalog.store {
+                GameStore::Xbox => Action::RefreshCatalog,
+                GameStore::Epic => Action::RefreshEpicCatalog,
+            });
         }
     });
 }
@@ -148,7 +160,10 @@ fn empty_state(ui: &mut egui::Ui, catalog: &Catalog, out: &mut Vec<Action>) {
         };
         ui.label(RichText::new(text).color(Color32::GRAY));
         if !catalog.games.is_empty() && ui.button("Reset filters").clicked() {
-            out.push(Action::ResetCatalogFilters);
+            out.push(match catalog.store {
+                GameStore::Xbox => Action::ResetCatalogFilters,
+                GameStore::Epic => Action::ResetEpicCatalogFilters,
+            });
         }
     });
 }

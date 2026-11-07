@@ -3,6 +3,7 @@ use crate::catalog::Catalog;
 use crate::downloads::DownloadManager;
 use crate::images::ImageCache;
 use crate::library::{self, Library, LibraryEntry};
+use crate::model::GameStore;
 use crate::player::TrailerPlayer;
 use crate::settings::Settings;
 use crate::ui::game_modal::ModalState;
@@ -22,6 +23,7 @@ const MAIN_MARGIN: f32 = 28.0;
 pub struct App {
     page: Page,
     catalog: Catalog,
+    epic_catalog: Catalog,
     library: Library,
     settings: Settings,
     updates: UpdateCheck,
@@ -39,7 +41,8 @@ impl App {
     pub fn new() -> Self {
         let mut app = Self {
             page: Page::Home,
-            catalog: Catalog::new(),
+            catalog: Catalog::new(GameStore::Xbox),
+            epic_catalog: Catalog::new(GameStore::Epic),
             library: Library::new(),
             settings: Settings::load(),
             updates: UpdateCheck::new(),
@@ -65,14 +68,23 @@ impl App {
     }
 
     fn rematch_library(&mut self) {
-        self.library.rematch(&self.catalog.games);
+        let games: Vec<_> = self
+            .catalog
+            .games
+            .iter()
+            .chain(&self.epic_catalog.games)
+            .cloned()
+            .collect();
+        self.library.rematch(&games);
         self.catalog.mark_dirty();
+        self.epic_catalog.mark_dirty();
     }
 
     /// Intègre les résultats des threads d'arrière-plan.
     fn poll(&mut self, ctx: &egui::Context) {
         self.images.poll(ctx);
         let catalog_changed = self.catalog.poll();
+        let epic_catalog_changed = self.epic_catalog.poll();
         let library_changed = self.library.poll();
         self.updates.poll();
         let completed_before = self
@@ -91,10 +103,12 @@ impl App {
         if completed_after > completed_before {
             self.scan_library();
         }
-        if catalog_changed || library_changed {
+        if catalog_changed || epic_catalog_changed || library_changed {
             self.rematch_library();
         }
         if self.catalog.is_loading()
+            || self.epic_catalog.is_loading()
+            || epic_catalog_changed
             || self.library.is_scanning()
             || self.updates.is_loading()
             || self.downloads.is_active()
@@ -105,21 +119,45 @@ impl App {
 
     fn apply(&mut self, action: Action) {
         match action {
-            Action::Navigate(page) => self.page = page,
+            Action::Navigate(page) => {
+                self.page = page;
+                if page == Page::EpicCatalog
+                    && self.epic_catalog.games.is_empty()
+                    && !self.epic_catalog.is_loading()
+                {
+                    self.epic_catalog.refresh();
+                }
+            }
             Action::OpenGame(id) => {
                 self.modal = ModalState::default();
                 self.selected = Some(id);
             }
-            Action::PrepareDownload { id, name } => {
+            Action::PrepareDownload { id, name, store } => {
                 self.trailer.close();
                 self.selected = None;
                 self.download_name = name;
                 self.page = Page::Downloads;
-                if let Err(error) =
-                    self.downloads
-                        .start_xbox(&id, &self.download_name, &self.settings.library_dir)
-                {
-                    self.downloads.notice = error;
+                match store {
+                    GameStore::Xbox => {
+                        if let Err(error) = self.downloads.start_xbox(
+                            &id,
+                            &self.download_name,
+                            &self.settings.library_dir,
+                        ) {
+                            self.downloads.notice = error;
+                        }
+                    }
+                    GameStore::Epic => {
+                        if let Some(game) = self.epic_catalog.game(&id).cloned() {
+                            if let Err(error) =
+                                self.downloads.start_epic(&game, &self.settings.library_dir)
+                            {
+                                self.downloads.notice = error;
+                            }
+                        } else {
+                            self.downloads.notice = "Epic game metadata is unavailable. Refresh the Epic catalog and try again.".into();
+                        }
+                    }
                 }
             }
             Action::CloseGame => {
@@ -133,11 +171,25 @@ impl App {
                 self.selected = None;
                 self.catalog.refresh();
             }
+            Action::RefreshEpicCatalog => {
+                self.images.clear_failed();
+                self.selected = None;
+                self.epic_catalog.refresh();
+            }
             Action::ResetCatalogFilters => self.catalog.reset_filters(),
             Action::CatalogStatus(text) => self.catalog.status = text,
+            Action::ResetEpicCatalogFilters => self.epic_catalog.reset_filters(),
+            Action::EpicCatalogStatus(text) => self.epic_catalog.status = text,
             Action::ScanLibrary => self.scan_library(),
             Action::PlayGame { name, path } => {
-                self.library.status = match library::launch_game(&path) {
+                let epic_exe = self
+                    .epic_catalog
+                    .games
+                    .iter()
+                    .find(|g| g.name == name)
+                    .map(|g| g.launch_exe.as_str())
+                    .filter(|exe| !exe.is_empty());
+                self.library.status = match library::launch_game(&path, epic_exe) {
                     Ok(()) => format!("Launching {name}…"),
                     Err(error) => error,
                 };
@@ -161,6 +213,13 @@ impl App {
             Page::Catalog => {
                 catalog_page::show(ui, &mut self.catalog, &self.library, &mut self.images, out)
             }
+            Page::EpicCatalog => catalog_page::show(
+                ui,
+                &mut self.epic_catalog,
+                &self.library,
+                &mut self.images,
+                out,
+            ),
             Page::Library => library_page::show(
                 ui,
                 &mut self.library,

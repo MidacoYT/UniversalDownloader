@@ -2,12 +2,13 @@
 pub mod api;
 
 use crate::library::Library;
-use crate::model::Game;
-use crate::util::size_in_gb;
 pub use crate::model::{ALL_GENRES, ALL_PLATFORMS};
+use crate::model::{Game, GameStore};
+use crate::util::size_in_gb;
 use std::sync::mpsc::{self, Receiver};
 
 pub const PAGE_SIZE: usize = 24;
+pub const EPIC_API_BASE: &str = "https://epicapi.netlify.app";
 pub static PLATFORMS: [&str; 4] = [ALL_PLATFORMS, "PC", "Xbox", "Cloud"];
 
 #[derive(PartialEq, Clone, Copy)]
@@ -53,6 +54,7 @@ pub enum CatalogEvent {
 }
 
 pub struct Catalog {
+    pub store: GameStore,
     pub games: Vec<Game>,
     pub search: String,
     pub platform_filter: &'static str,
@@ -72,8 +74,9 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    pub fn new() -> Self {
+    pub fn new(store: GameStore) -> Self {
         Self {
+            store,
             games: Vec::new(),
             search: String::new(),
             platform_filter: ALL_PLATFORMS,
@@ -142,8 +145,11 @@ impl Catalog {
         self.games.clear();
         self.visible.clear();
         self.dirty = true;
-        self.status = "Loading the Xbox catalog…".into();
-        api::spawn_refresh(tx);
+        self.status = match self.store {
+            GameStore::Xbox => "Loading the Xbox catalog…".into(),
+            GameStore::Epic => "Loading the Epic Games catalog…".into(),
+        };
+        api::spawn_refresh(tx, self.store);
     }
 
     /// Consomme les événements réseau. Retourne `true` si la bibliothèque doit être ré-associée.
@@ -157,10 +163,13 @@ impl Catalog {
                     self.games = games;
                     self.dirty = true;
                     rematch = true;
-                    self.status = format!(
-                        "{} games found — loading Microsoft details…",
-                        self.games.len()
-                    );
+                    self.status = match self.store {
+                        GameStore::Xbox => format!(
+                            "{} games found — loading Microsoft details…",
+                            self.games.len()
+                        ),
+                        GameStore::Epic => format!("{} Epic games found.", self.games.len()),
+                    };
                 }
                 CatalogEvent::Updated(updates) => {
                     for updated in updates {
@@ -171,11 +180,16 @@ impl Catalog {
                     self.dirty = true;
                 }
                 CatalogEvent::Done(Ok(count)) => {
-                    self.status = format!(
-                        "{} games — {} detailed profiles loaded",
-                        self.games.len(),
-                        count
-                    );
+                    self.status = match self.store {
+                        GameStore::Xbox => format!(
+                            "{} games — {} detailed profiles loaded",
+                            self.games.len(),
+                            count
+                        ),
+                        GameStore::Epic => {
+                            format!("{} Epic manifests available.", self.games.len())
+                        }
+                    };
                     finished = true;
                     rematch = true;
                 }

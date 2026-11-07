@@ -43,7 +43,9 @@ pub struct LibraryRow<'a> {
 
 impl LibraryRow<'_> {
     pub fn title(&self) -> &str {
-        self.game.map(|g| g.name.as_str()).unwrap_or(&self.entry.name)
+        self.game
+            .map(|g| g.name.as_str())
+            .unwrap_or(&self.entry.name)
     }
 }
 
@@ -196,7 +198,9 @@ fn folder_size(path: &Path) -> u64 {
     entries
         .flatten()
         .map(|entry| {
-            let Ok(kind) = entry.file_type() else { return 0 };
+            let Ok(kind) = entry.file_type() else {
+                return 0;
+            };
             if kind.is_file() {
                 entry.metadata().map(|m| m.len()).unwrap_or(0)
             } else if kind.is_dir() {
@@ -239,19 +243,24 @@ fn match_installed_game<'a>(folder: &str, games: &'a [Game]) -> Option<&'a Game>
 }
 
 /// Lance le premier .exe du dossier (hors utilitaires `wdapp`).
-pub fn launch_game(folder: &Path) -> Result<(), String> {
-    let executable = std::fs::read_dir(folder)
-        .map_err(|e| format!("Could not read game folder: {e}"))?
-        .flatten()
-        .map(|entry| entry.path())
-        .find(|path| {
-            path.extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
-                && !path
-                    .file_name()
-                    .is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().contains("wdapp"))
-        })
-        .ok_or_else(|| "No game executable was found in this folder.".to_owned())?;
+pub fn launch_game(folder: &Path, preferred_exe: Option<&str>) -> Result<(), String> {
+    let preferred = preferred_exe.map(|exe| folder.join(exe.replace('/', "\\")));
+    let executable = if let Some(path) = preferred.filter(|path| path.is_file()) {
+        path
+    } else {
+        std::fs::read_dir(folder)
+            .map_err(|e| format!("Could not read game folder: {e}"))?
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+                    && !path
+                        .file_name()
+                        .is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().contains("wdapp"))
+            })
+            .ok_or_else(|| "No game executable was found in this folder.".to_owned())?
+    };
 
     std::process::Command::new(&executable)
         .current_dir(folder)

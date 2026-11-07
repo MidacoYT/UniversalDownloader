@@ -19,6 +19,7 @@ pub fn show(ui: &mut egui::Ui, current: Page, out: &mut Vec<Action>) {
     let items = [
         (Page::Home, "Home", icons::dashboard(ICON_SIZE)),
         (Page::Catalog, "Catalog", icons::catalog(ICON_SIZE)),
+        (Page::EpicCatalog, "Epic Games", icons::catalog(ICON_SIZE)),
         (Page::Library, "My Library", icons::folder(ICON_SIZE)),
         (Page::Downloads, "Downloads", icons::download(ICON_SIZE)),
         (Page::Updates, "Updates", icons::calendar(ICON_SIZE)),

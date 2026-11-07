@@ -1,3 +1,6 @@
 /target
 /dist
 *.pdb
+/epic_chunk_urls/
+__pycache__/
+*.py[cod]

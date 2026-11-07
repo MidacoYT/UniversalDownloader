@@ -187,13 +187,29 @@ fn actions(ui: &mut egui::Ui, game: &Game, out: &mut Vec<Action>) {
         egui::vec2(ui.available_width(), 32.0),
         egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center),
         |ui| {
-            let download =
-                egui::Button::image_and_text(icons::download(15.0), "Download").fill(theme::ACCENT);
-            if ui.add(download).clicked() {
-                out.push(Action::PrepareDownload {
-                    id: game.id.clone(),
-                    name: game.display_name().to_owned(),
-                });
+            if game.store == crate::model::GameStore::Xbox {
+                let download = egui::Button::image_and_text(icons::download(15.0), "Download")
+                    .fill(theme::ACCENT);
+                if ui.add(download).clicked() {
+                    out.push(Action::PrepareDownload {
+                        id: game.id.clone(),
+                        name: game.display_name().to_owned(),
+                        store: game.store,
+                    });
+                }
+            } else {
+                let download = egui::Button::image_and_text(icons::download(15.0), "Download")
+                    .fill(theme::ACCENT);
+                if ui
+                    .add_enabled(!game.manifest_url.is_empty(), download)
+                    .clicked()
+                {
+                    out.push(Action::PrepareDownload {
+                        id: game.id.clone(),
+                        name: game.display_name().to_owned(),
+                        store: game.store,
+                    });
+                }
             }
             if ui.add(egui::Button::image(icons::info(16.0))).clicked() {
                 out.push(Action::OpenGame(game.id.clone()));

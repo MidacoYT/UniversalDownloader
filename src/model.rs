@@ -3,8 +3,16 @@
 pub const ALL_PLATFORMS: &str = "All platforms";
 pub const ALL_GENRES: &str = "All genres";
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum GameStore {
+    #[default]
+    Xbox,
+    Epic,
+}
+
 #[derive(Clone, Default)]
 pub struct Game {
+    pub store: GameStore,
     pub id: String,
     pub name: String,
     pub image: String,
@@ -15,6 +23,10 @@ pub struct Game {
     pub support_uri: String,
     pub language: String,
     pub last_modified: String,
+    pub manifest_url: String,
+    pub cdn_bases: Vec<String>,
+    pub launch_exe: String,
+    pub egdata_url: String,
     pub release: String,
     pub date_added: String,
     pub size: String,
@@ -111,8 +123,12 @@ impl GameAttribute {
             | "XblCrossPlatformCoop"
             | "XblCrossPlatformMultiPlayer"
             | "XboxLiveCrossGenMP" => FeatureGroup::Multiplayer,
-            "Capability4k" | "CapabilityHDR" | "CapabilityXboxEnhanced" | "ConsoleGen9Optimized"
-            | "60fps" | "120fps" => FeatureGroup::Graphics,
+            "Capability4k"
+            | "CapabilityHDR"
+            | "CapabilityXboxEnhanced"
+            | "ConsoleGen9Optimized"
+            | "60fps"
+            | "120fps" => FeatureGroup::Graphics,
             "ConsoleCrossGen" | "PcGamePad" | "XPA" | "OptimizedForSeriesX" => {
                 FeatureGroup::Compatibility
             }

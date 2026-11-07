@@ -1,6 +1,6 @@
 //! Accès réseau au catalogue (liste de jeux + détails Microsoft) et parsing JSON.
-use super::CatalogEvent;
-use crate::model::{Game, GameAttribute, Trailer};
+use super::{CatalogEvent, EPIC_API_BASE};
+use crate::model::{Game, GameAttribute, GameStore, Trailer};
 use crate::net;
 use crate::util::{GIB, format_date};
 use reqwest::blocking::Client;
@@ -17,11 +17,11 @@ const DETAILS_URL: &str = "https://displaycatalog.mp.microsoft.com/v7.0/products
 const BATCH_SIZE: usize = 10;
 
 /// Charge la liste puis enrichit chaque jeu par lots, dans un thread dédié.
-pub fn spawn_refresh(tx: Sender<CatalogEvent>) {
-    std::thread::spawn(move || run(tx));
+pub fn spawn_refresh(tx: Sender<CatalogEvent>, store: GameStore) {
+    std::thread::spawn(move || run(tx, store));
 }
 
-fn run(tx: Sender<CatalogEvent>) {
+fn run(tx: Sender<CatalogEvent>, store: GameStore) {
     let client = match net::client(20) {
         Ok(client) => client,
         Err(error) => {
@@ -29,7 +29,11 @@ fn run(tx: Sender<CatalogEvent>) {
             return;
         }
     };
-    let mut games = match download_catalog(&client) {
+    let result = match store {
+        GameStore::Xbox => download_catalog(&client),
+        GameStore::Epic => download_epic_catalog(&client),
+    };
+    let mut games = match result {
         Ok(games) => games,
         Err(error) => {
             let _ = tx.send(CatalogEvent::Done(Err(error)));
@@ -37,8 +41,136 @@ fn run(tx: Sender<CatalogEvent>) {
         }
     };
     let _ = tx.send(CatalogEvent::Initial(games.clone()));
-    let enriched = enrich(&client, &mut games, &tx);
+    let enriched = match store {
+        GameStore::Xbox => enrich(&client, &mut games, &tx),
+        GameStore::Epic => games.len(),
+    };
     let _ = tx.send(CatalogEvent::Done(Ok(enriched)));
+}
+
+fn download_epic_catalog(client: &Client) -> Result<Vec<Game>, String> {
+    const CATALOG_KEY: &str = "9eEo0ksYvZTsXgPiJUz7hQCio18hW+mPlQhy0UBq+10=";
+    let data: Value = client
+        .get(format!("{EPIC_API_BASE}/games"))
+        .bearer_auth(CATALOG_KEY)
+        .send()
+        .and_then(|response| response.error_for_status())
+        .and_then(|response| response.json())
+        .map_err(|error| format!("Could not load Epic catalog: {error}"))?;
+    parse_epic_catalog(&data)
+}
+
+pub fn parse_epic_catalog(data: &Value) -> Result<Vec<Game>, String> {
+    let entries = data
+        .as_array()
+        .or_else(|| data.get("games").and_then(Value::as_array))
+        .ok_or("Epic API returned an invalid game list.")?;
+    let mut seen = std::collections::HashSet::new();
+    let mut games = Vec::new();
+    for item in entries {
+        let Some(id) = item.get("appName").and_then(Value::as_str).map(str::trim) else {
+            continue;
+        };
+        let Some(name) = item.get("name").and_then(Value::as_str).map(str::trim) else {
+            continue;
+        };
+        if id.is_empty() || name.is_empty() || !seen.insert(id.to_owned()) {
+            continue;
+        }
+        let mut game = Game {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            store: GameStore::Epic,
+            platform: "Windows".into(),
+            manifest_url: item
+                .get("manifestUrl")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            image: item
+                .get("image")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            hero: item
+                .get("hero")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            developer: item
+                .get("developer")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            publisher: item
+                .get("publisher")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            description: item
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            launch_exe: item
+                .get("launchExe")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            egdata_url: item
+                .get("egdataUrl")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            cdn_bases: item
+                .get("cdnBases")
+                .and_then(Value::as_array)
+                .map(|xs| {
+                    xs.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            genres: item
+                .get("genres")
+                .and_then(Value::as_array)
+                .map(|xs| {
+                    xs.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            screenshots: item
+                .get("screenshots")
+                .and_then(Value::as_array)
+                .map(|xs| {
+                    xs.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            ..Default::default()
+        };
+        if let Some(bytes) = item.get("installSize").and_then(Value::as_u64) {
+            game.size = format!("{:.1} GB", bytes as f64 / GIB as f64);
+        }
+        if let Some(version) = item.get("buildVersion").and_then(Value::as_str) {
+            game.last_modified = version.to_owned();
+        }
+        if let Some(release) = item.get("releaseDate").and_then(Value::as_str) {
+            game.release = release.to_owned();
+        }
+        game.refresh_search_key();
+        games.push(game);
+    }
+    games.sort_by_cached_key(|game| game.name.to_lowercase());
+    if games.is_empty() {
+        return Err("Epic API contains no valid game manifests.".into());
+    }
+    Ok(games)
 }
 
 fn download_catalog(client: &Client) -> Result<Vec<Game>, String> {
@@ -324,9 +456,8 @@ fn parse_rating_count(product: &Value) -> u64 {
 
 fn parse_rating(localized: &Value, product: &Value) -> String {
     let ratings = localized["ContentRatings"].as_array();
-    let find = |system: &str| {
-        ratings.and_then(|items| items.iter().find(|r| r["RatingSystem"] == system))
-    };
+    let find =
+        |system: &str| ratings.and_then(|items| items.iter().find(|r| r["RatingSystem"] == system));
     find("PEGI")
         .or_else(|| find("ESRB"))
         .and_then(|rating| {

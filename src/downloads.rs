@@ -1,4 +1,5 @@
 //! Téléchargements HTTP(S) directs, indépendants du catalogue Xbox.
+use crate::model::Game;
 use reqwest::Url;
 use reqwest::blocking::Client;
 use reqwest::header::{CONTENT_LENGTH, CONTENT_RANGE, RANGE, USER_AGENT};
@@ -474,6 +475,52 @@ impl DownloadManager {
         Ok(())
     }
 
+    /// Installe un build Epic à partir du manifest BuildPatch et de ses CDN publics.
+    pub fn start_epic(&mut self, game: &Game, folder: &str) -> Result<(), String> {
+        if game.manifest_url.is_empty() || game.cdn_bases.is_empty() {
+            return Err("Epic API is missing the manifest or CDN metadata for this game.".into());
+        }
+        let folder = PathBuf::from(folder.trim());
+        if !folder.is_absolute() {
+            return Err("Choose an absolute download folder.".into());
+        }
+        fs::create_dir_all(&folder).map_err(|e| format!("Could not create library folder: {e}"))?;
+        let game_dir = folder.join(sanitize_filename(&game.name));
+        fs::create_dir(&game_dir)
+            .map_err(|e| format!("Could not create game folder (it may already exist): {e}"))?;
+        let id = self.next_id;
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .ok_or_else(|| "No more download IDs are available.".to_owned())?;
+        let control = Arc::new(Control::new());
+        self.entries.push(Download {
+            id,
+            name: game.name.clone(),
+            path: game_dir.clone(),
+            received: 0,
+            total: 0,
+            speed: 0,
+            status: DownloadStatus::Queued,
+            downloaded_size: 0,
+            registration: None,
+            control: Arc::clone(&control),
+            product_id: None,
+            restored: false,
+        });
+        self.notice.clear();
+        let tx = self.tx.clone();
+        let game = game.clone();
+        std::thread::spawn(move || {
+            let result = run_epic_download(id, game, game_dir.clone(), control, tx.clone());
+            if result.is_err() {
+                let _ = fs::remove_dir_all(&game_dir);
+            }
+            let _ = tx.send(DownloadEvent::Finished { id, result });
+        });
+        Ok(())
+    }
+
     pub fn pause(&mut self, id: u64) {
         if let Some(entry) = self.entries.iter_mut().find(|item| item.id == id) {
             if matches!(
@@ -651,6 +698,466 @@ impl DownloadManager {
                     | DownloadStatus::Registering
             )
         })
+    }
+}
+
+#[derive(Clone)]
+struct EpicChunk {
+    guid: [u32; 4],
+    hash: u64,
+    group: u8,
+    size: u64,
+}
+#[derive(Clone)]
+struct EpicPart {
+    guid: [u32; 4],
+    offset: u32,
+    size: u32,
+}
+struct EpicFile {
+    name: String,
+    sha1: Vec<u8>,
+    parts: Vec<EpicPart>,
+}
+struct EpicChunkCache(PathBuf);
+impl Drop for EpicChunkCache {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn run_epic_download(
+    id: u64,
+    game: Game,
+    root: PathBuf,
+    control: Arc<Control>,
+    tx: mpsc::Sender<DownloadEvent>,
+) -> Result<(), String> {
+    use sha1::Digest;
+    let client = Client::builder()
+        .timeout(Duration::from_secs(180))
+        .user_agent(crate::net::USER_AGENT)
+        .build()
+        .map_err(|e| e.to_string())?;
+    let manifest_url = if game.manifest_url.starts_with("http") {
+        game.manifest_url.clone()
+    } else {
+        format!("{}{}", crate::catalog::EPIC_API_BASE, game.manifest_url)
+    };
+    let bytes = client
+        .get(&manifest_url)
+        .send()
+        .map_err(|e| format!("Epic manifest request failed: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("Epic manifest request failed: {e}"))?
+        .bytes()
+        .map_err(|e| e.to_string())?;
+    let (chunks, files, feature) = parse_epic_manifest(&bytes)?;
+    let by_guid: std::collections::HashMap<_, _> =
+        chunks.into_iter().map(|c| (c.guid, c)).collect();
+    let bytes_total: u64 = by_guid.values().map(|c| c.size).sum();
+    if bytes_total == 0 {
+        return Err("Epic manifest contains no chunks.".into());
+    }
+    let mut received_chunks = 0u64;
+    let cache_dir = std::env::temp_dir()
+        .join("UniversalDownloader")
+        .join(format!("epic-chunks-{id}"));
+    fs::create_dir_all(&cache_dir)
+        .map_err(|e| format!("Could not create Epic chunk cache: {e}"))?;
+    let _cache_guard = EpicChunkCache(cache_dir.clone());
+    let mut remaining = std::collections::HashMap::<[u32; 4], usize>::new();
+    for file in &files {
+        for part in &file.parts {
+            *remaining.entry(part.guid).or_default() += 1;
+        }
+    }
+    let mut cached = std::collections::HashMap::<[u32; 4], PathBuf>::new();
+    for file in files {
+        if !control.wait_until_resumed() {
+            return Err("cancelled".into());
+        }
+        if file.parts.is_empty() {
+            let relative = Path::new(&file.name);
+            if relative.is_absolute()
+                || relative.components().any(|c| {
+                    matches!(
+                        c,
+                        std::path::Component::ParentDir | std::path::Component::Prefix(_)
+                    )
+                })
+            {
+                return Err(format!("Unsafe path in Epic manifest: {}", file.name));
+            }
+            let destination = root.join(relative);
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            File::create(&destination)
+                .map_err(|e| format!("Could not create {}: {e}", destination.display()))?;
+            if sha1::Sha1::digest([]).as_slice() != file.sha1.as_slice() {
+                return Err(format!(
+                    "Unsupported Epic manifest entry without chunk data: {}",
+                    file.name
+                ));
+            }
+            continue;
+        }
+        let relative = Path::new(&file.name);
+        if relative.is_absolute()
+            || relative.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::ParentDir | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return Err(format!("Unsafe path in Epic manifest: {}", file.name));
+        }
+        let destination = root.join(relative);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let mut output = File::create(&destination)
+            .map_err(|e| format!("Could not create {}: {e}", destination.display()))?;
+        let mut file_hash = sha1::Sha1::new();
+        for part in file.parts {
+            if !control.wait_until_resumed() {
+                return Err("cancelled".into());
+            }
+            let chunk = by_guid.get(&part.guid).ok_or_else(|| {
+                format!(
+                    "Epic manifest references an unknown chunk for {}",
+                    file.name
+                )
+            })?;
+            let path = epic_chunk_path(chunk, feature);
+            if !cached.contains_key(&part.guid) {
+                let mut fetched = None;
+                for base in &game.cdn_bases {
+                    let url = format!("{}/{}", base.trim_end_matches('/'), path);
+                    match client
+                        .get(&url)
+                        .send()
+                        .and_then(|r| r.error_for_status())
+                        .and_then(|r| r.bytes())
+                    {
+                        Ok(data) => {
+                            fetched = Some(data.to_vec());
+                            break;
+                        }
+                        Err(_) => {}
+                    }
+                    if fetched.is_some() {
+                        break;
+                    }
+                }
+                let raw = fetched.ok_or_else(|| {
+                    format!("Could not fetch Epic chunk {} from available CDNs.", path)
+                })?;
+                let cache_path = cache_dir.join(format!(
+                    "{:08X}{:08X}{:08X}{:08X}.chunk",
+                    part.guid[0], part.guid[1], part.guid[2], part.guid[3]
+                ));
+                fs::write(&cache_path, raw)
+                    .map_err(|e| format!("Could not cache Epic chunk: {e}"))?;
+                cached.insert(part.guid, cache_path);
+                received_chunks = received_chunks.saturating_add(chunk.size);
+                publish_progress(&tx, id, received_chunks, bytes_total, 0);
+            }
+            let raw = fs::read(cached.get(&part.guid).unwrap())
+                .map_err(|e| format!("Could not read cached Epic chunk: {e}"))?;
+            let data = epic_chunk_data(&raw)?;
+            let start = part.offset as usize;
+            let end = start
+                .checked_add(part.size as usize)
+                .filter(|end| *end <= data.len())
+                .ok_or("Epic chunk part is out of range.")?;
+            output
+                .write_all(&data[start..end])
+                .map_err(|e| e.to_string())?;
+            file_hash.update(&data[start..end]);
+            let left = remaining.get_mut(&part.guid).unwrap();
+            *left -= 1;
+            if *left == 0 {
+                if let Some(path) = cached.remove(&part.guid) {
+                    let _ = fs::remove_file(path);
+                }
+            }
+        }
+        output.flush().map_err(|e| e.to_string())?;
+        if file_hash.finalize().as_slice() != file.sha1.as_slice() {
+            return Err(format!("File hash verification failed: {}", file.name));
+        }
+    }
+    Ok(())
+}
+
+fn parse_epic_manifest(raw: &[u8]) -> Result<(Vec<EpicChunk>, Vec<EpicFile>, u32), String> {
+    use sha1::Digest;
+    use std::io::Read;
+    let mut r = EpicReader { b: raw, p: 0 };
+    if r.u32()? != 0x44BEC00C {
+        return Err("Epic manifest has an invalid BuildPatch header.".into());
+    }
+    let header = r.u32()? as usize;
+    let unpacked = r.u32()? as usize;
+    let _compressed = r.u32()? as usize;
+    let sha = r.take(20)?.to_vec();
+    let stored = r.u8()?;
+    let feature = r.u32()?;
+    if feature >= 22 {
+        r.take(32)?;
+    }
+    r.p = header;
+    let body = if stored & 1 != 0 {
+        let mut z = flate2::read::ZlibDecoder::new(&raw[r.p..]);
+        let mut out = Vec::with_capacity(unpacked);
+        z.read_to_end(&mut out)
+            .map_err(|e| format!("Could not decompress Epic manifest: {e}"))?;
+        out
+    } else {
+        raw[r.p..].to_vec()
+    };
+    if stored & 1 != 0 && sha1::Sha1::digest(&body).as_slice() != sha.as_slice() {
+        return Err("Epic manifest SHA-1 validation failed.".into());
+    }
+    let mut r = EpicReader { b: &body, p: 0 };
+    let meta_size = r.u32()? as usize;
+    r.u8()?;
+    r.u32()?;
+    r.u8()?;
+    r.u32()?;
+    r.string()?;
+    r.string()?;
+    r.string()?;
+    r.string()?;
+    let prereq = r.u32()?;
+    for _ in 0..prereq {
+        r.string()?;
+    }
+    r.string()?;
+    r.string()?;
+    r.string()?;
+    r.p = meta_size;
+    let cdl_start = r.p;
+    let cdl_size = r.u32()? as usize;
+    r.u8()?;
+    let count = r.u32()? as usize;
+    if count > 2_000_000 {
+        return Err("Epic manifest chunk count is invalid.".into());
+    }
+    let mut guids = Vec::with_capacity(count);
+    for _ in 0..count {
+        guids.push(r.guid()?);
+    }
+    let mut hashes = Vec::with_capacity(count);
+    for _ in 0..count {
+        hashes.push(r.u64()?);
+    }
+    r.take(count * 20)?;
+    let mut groups = Vec::with_capacity(count);
+    for _ in 0..count {
+        groups.push(r.u8()?);
+    }
+    r.take(count * 4)?;
+    let mut sizes = Vec::with_capacity(count);
+    for _ in 0..count {
+        let n = i64::from_le_bytes(r.take(8)?.try_into().unwrap());
+        sizes.push(n.max(0) as u64);
+    }
+    if feature >= 22 {
+        r.take(count * 36)?;
+    }
+    r.p = cdl_start + cdl_size;
+    let chunks = guids
+        .into_iter()
+        .zip(hashes)
+        .zip(groups)
+        .zip(sizes)
+        .map(|(((guid, hash), group), size)| EpicChunk {
+            guid,
+            hash,
+            group,
+            size,
+        })
+        .collect();
+    let fml_start = r.p;
+    let fml_size = r.u32()? as usize;
+    let fml_ver = r.u8()?;
+    let nf = r.u32()? as usize;
+    if nf > 2_000_000 {
+        return Err("Epic manifest file count is invalid.".into());
+    }
+    let mut names = Vec::with_capacity(nf);
+    for _ in 0..nf {
+        names.push(r.string()?);
+    }
+    for _ in 0..nf {
+        r.string()?;
+    }
+    let mut hashes = Vec::with_capacity(nf);
+    for _ in 0..nf {
+        hashes.push(r.take(20)?.to_vec());
+    }
+    r.take(nf)?;
+    for _ in 0..nf {
+        let tags = r.u32()?;
+        for _ in 0..tags {
+            r.string()?;
+        }
+    }
+    let mut files = Vec::with_capacity(nf);
+    for i in 0..nf {
+        let np = r.u32()? as usize;
+        if np > 2_000_000 {
+            return Err("Epic file chunk count is invalid.".into());
+        }
+        let mut parts = Vec::with_capacity(np);
+        for _ in 0..np {
+            let size = r.u32()?;
+            let guid = r.guid()?;
+            let offset = r.u32()?;
+            let n = r.u32()?;
+            if size > 28 {
+                r.take((size - 28) as usize)?;
+            }
+            parts.push(EpicPart {
+                guid,
+                offset,
+                size: n,
+            });
+        }
+        files.push(EpicFile {
+            name: names[i].clone(),
+            sha1: hashes[i].clone(),
+            parts,
+        });
+    }
+    if fml_ver >= 1 {
+        for _ in 0..nf {
+            if r.u32()? != 0 {
+                r.take(16)?;
+            }
+        }
+        for _ in 0..nf {
+            r.string()?;
+        }
+    }
+    if fml_ver >= 2 {
+        r.take(nf * 32)?;
+    }
+    let fml_end = fml_start
+        .checked_add(fml_size)
+        .ok_or("Epic manifest FML size overflowed.")?;
+    if r.p > fml_end {
+        return Err("Epic manifest FML section exceeded its declared size.".into());
+    }
+    Ok((chunks, files, feature))
+}
+
+struct EpicReader<'a> {
+    b: &'a [u8],
+    p: usize,
+}
+impl<'a> EpicReader<'a> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
+        let e = self
+            .p
+            .checked_add(n)
+            .filter(|e| *e <= self.b.len())
+            .ok_or("Unexpected end of Epic manifest.")?;
+        let s = &self.b[self.p..e];
+        self.p = e;
+        Ok(s)
+    }
+    fn u8(&mut self) -> Result<u8, String> {
+        Ok(self.take(1)?[0])
+    }
+    fn u32(&mut self) -> Result<u32, String> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+    fn u64(&mut self) -> Result<u64, String> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+    fn guid(&mut self) -> Result<[u32; 4], String> {
+        Ok([self.u32()?, self.u32()?, self.u32()?, self.u32()?])
+    }
+    fn string(&mut self) -> Result<String, String> {
+        let n = self.u32()? as i32;
+        if n == 0 {
+            return Ok(String::new());
+        }
+        if n > 0 {
+            let b = self.take(n as usize)?;
+            return Ok(String::from_utf8_lossy(&b[..b.len() - 1]).into_owned());
+        }
+        let count = (-n) as usize;
+        let b = self.take(count * 2)?;
+        String::from_utf16(
+            &b.chunks_exact(2)
+                .take(count.saturating_sub(1))
+                .map(|x| u16::from_le_bytes([x[0], x[1]]))
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|e| e.to_string())
+    }
+}
+
+fn epic_chunk_path(chunk: &EpicChunk, version: u32) -> String {
+    let dir = if version >= 22 {
+        "ChunksV5"
+    } else if version >= 15 {
+        "ChunksV4"
+    } else if version >= 6 {
+        "ChunksV3"
+    } else if version >= 3 {
+        "ChunksV2"
+    } else {
+        "Chunks"
+    };
+    format!(
+        "{dir}/{:02}/{:016X}_{}.chunk",
+        chunk.group,
+        chunk.hash,
+        chunk
+            .guid
+            .iter()
+            .map(|x| format!("{x:08X}"))
+            .collect::<String>()
+    )
+}
+fn epic_chunk_data(raw: &[u8]) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut r = EpicReader { b: raw, p: 0 };
+    if r.u32()? != 0xB1FE3AA2 {
+        return Err("Epic chunk has an invalid header.".into());
+    }
+    let version = r.u32()?;
+    let header = r.u32()? as usize;
+    let size = r.u32()? as usize;
+    r.take(16 + 8)?;
+    let stored = r.u8()?;
+    if version >= 2 {
+        r.take(21)?;
+    }
+    if version >= 3 {
+        r.u32()?;
+    }
+    if version >= 4 {
+        return Err(
+            "Encrypted Epic chunks (header v4+) require a key not provided by EpicApi.".into(),
+        );
+    }
+    r.p = header;
+    let payload = r.take(size)?;
+    if stored & 1 != 0 {
+        let mut z = flate2::read::ZlibDecoder::new(payload);
+        let mut out = Vec::new();
+        z.read_to_end(&mut out).map_err(|e| e.to_string())?;
+        Ok(out)
+    } else {
+        Ok(payload.to_vec())
     }
 }
 
