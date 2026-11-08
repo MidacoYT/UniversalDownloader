@@ -9,8 +9,8 @@ use std::io::{self, Read, Write};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -1024,56 +1024,60 @@ fn run_epic_download(
                 let cdns = &game.cdn_bases;
                 let cache_dir = &cache_dir;
                 let control = &control;
-                scope.spawn(move || loop {
-                    if !control.wait_until_resumed() {
-                        break;
-                    }
-                    let chunk = jobs
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .pop_front();
-                    let Some(chunk) = chunk else { break };
-                    let path = epic_chunk_path(&chunk, feature);
-                    let cache_path = cache_dir.join(format!(
-                        "{:08X}{:08X}{:08X}{:08X}.chunk",
-                        chunk.guid[0], chunk.guid[1], chunk.guid[2], chunk.guid[3]
-                    ));
-                    let fetched = (|| -> Result<(PathBuf, u64), String> {
-                        let mut last_error = None;
-                        for base in cdns {
-                            if !control.wait_until_resumed() {
-                                return Err("cancelled".into());
-                            }
-                            let url = format!("{}/{}", base.trim_end_matches('/'), path);
-                            match client
-                                .get(&url)
-                                .send()
-                                .and_then(|response| response.error_for_status())
-                                .and_then(|response| response.bytes())
-                            {
-                                Ok(data) => {
-                                    let raw = data.to_vec();
-                                    if let Err(error) = epic_chunk_data(&raw) {
-                                        last_error = Some(error);
-                                        continue;
-                                    }
-                                    fs::write(&cache_path, &raw).map_err(|error| {
-                                        format!("Could not cache Epic chunk: {error}")
-                                    })?;
-                                    return Ok((cache_path, raw.len() as u64));
-                                }
-                                Err(error) => last_error = Some(error.without_url().to_string()),
-                            }
+                scope.spawn(move || {
+                    loop {
+                        if !control.wait_until_resumed() {
+                            break;
                         }
-                        Err(format!(
-                            "Could not fetch Epic chunk {path} from available CDNs{}.",
-                            last_error
-                                .map(|error| format!(" ({error})"))
-                                .unwrap_or_default()
-                        ))
-                    })();
-                    if result_tx.send((chunk.guid, chunk.size, fetched)).is_err() {
-                        break;
+                        let chunk = jobs
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .pop_front();
+                        let Some(chunk) = chunk else { break };
+                        let path = epic_chunk_path(&chunk, feature);
+                        let cache_path = cache_dir.join(format!(
+                            "{:08X}{:08X}{:08X}{:08X}.chunk",
+                            chunk.guid[0], chunk.guid[1], chunk.guid[2], chunk.guid[3]
+                        ));
+                        let fetched = (|| -> Result<(PathBuf, u64), String> {
+                            let mut last_error = None;
+                            for base in cdns {
+                                if !control.wait_until_resumed() {
+                                    return Err("cancelled".into());
+                                }
+                                let url = format!("{}/{}", base.trim_end_matches('/'), path);
+                                match client
+                                    .get(&url)
+                                    .send()
+                                    .and_then(|response| response.error_for_status())
+                                    .and_then(|response| response.bytes())
+                                {
+                                    Ok(data) => {
+                                        let raw = data.to_vec();
+                                        if let Err(error) = epic_chunk_data(&raw) {
+                                            last_error = Some(error);
+                                            continue;
+                                        }
+                                        fs::write(&cache_path, &raw).map_err(|error| {
+                                            format!("Could not cache Epic chunk: {error}")
+                                        })?;
+                                        return Ok((cache_path, raw.len() as u64));
+                                    }
+                                    Err(error) => {
+                                        last_error = Some(error.without_url().to_string())
+                                    }
+                                }
+                            }
+                            Err(format!(
+                                "Could not fetch Epic chunk {path} from available CDNs{}.",
+                                last_error
+                                    .map(|error| format!(" ({error})"))
+                                    .unwrap_or_default()
+                            ))
+                        })();
+                        if result_tx.send((chunk.guid, chunk.size, fetched)).is_err() {
+                            break;
+                        }
                     }
                 });
             }
@@ -2358,9 +2362,7 @@ fn transfer_xbox_ranges(
     let mut already_received = 0u64;
     let mut segment_start = 0u64;
     while segment_start < total {
-        let segment_end = segment_start
-            .saturating_add(RANGE_BYTES - 1)
-            .min(total - 1);
+        let segment_end = segment_start.saturating_add(RANGE_BYTES - 1).min(total - 1);
         let segment_path = xbox_segment_path(partial_path, segment_start);
         let expected_segment = segment_end - segment_start + 1;
         let mut existing = fs::metadata(&segment_path)
@@ -2393,30 +2395,32 @@ fn transfer_xbox_ranges(
                 let result_tx = result_tx.clone();
                 let progress_received = Arc::clone(&progress_received);
                 let speed_meter = Arc::clone(&speed_meter);
-                scope.spawn(move || loop {
-                    if control.get() != ControlState::Running {
-                        break;
+                scope.spawn(move || {
+                    loop {
+                        if control.get() != ControlState::Running {
+                            break;
+                        }
+                        let job = jobs
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .pop_front();
+                        let Some((start, end)) = job else { break };
+                        let path = xbox_segment_path(partial_path, start);
+                        let result = download_xbox_range(
+                            &client,
+                            url,
+                            total,
+                            start,
+                            end,
+                            &path,
+                            id,
+                            control,
+                            tx,
+                            &progress_received,
+                            &speed_meter,
+                        );
+                        let _ = result_tx.send(result);
                     }
-                    let job = jobs
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .pop_front();
-                    let Some((start, end)) = job else { break };
-                    let path = xbox_segment_path(partial_path, start);
-                    let result = download_xbox_range(
-                        &client,
-                        url,
-                        total,
-                        start,
-                        end,
-                        &path,
-                        id,
-                        control,
-                        tx,
-                        &progress_received,
-                        &speed_meter,
-                    );
-                    let _ = result_tx.send(result);
                 });
             }
             drop(result_tx);
@@ -2473,9 +2477,7 @@ fn transfer_xbox_ranges(
             remove_xbox_segments(partial_path, total)?;
             return Ok(false);
         }
-        let segment_end = segment_start
-            .saturating_add(RANGE_BYTES - 1)
-            .min(total - 1);
+        let segment_end = segment_start.saturating_add(RANGE_BYTES - 1).min(total - 1);
         let segment_path = xbox_segment_path(partial_path, segment_start);
         let expected_segment = segment_end - segment_start + 1;
         let metadata = fs::metadata(&segment_path)
@@ -2652,10 +2654,7 @@ fn download_xbox_range(
 }
 
 fn xbox_segment_path(partial_path: &Path, start: u64) -> PathBuf {
-    let mut name = partial_path
-        .file_name()
-        .unwrap_or_default()
-        .to_os_string();
+    let mut name = partial_path.file_name().unwrap_or_default().to_os_string();
     name.push(format!(".range.{start}"));
     partial_path.with_file_name(name)
 }
@@ -2675,7 +2674,10 @@ fn has_xbox_range_data(partial_path: &Path) -> bool {
         .filter_map(Result::ok)
         .any(|entry| {
             entry.file_name().to_string_lossy().starts_with(&prefix)
-                && entry.metadata().map(|metadata| metadata.len() > 0).unwrap_or(false)
+                && entry
+                    .metadata()
+                    .map(|metadata| metadata.len() > 0)
+                    .unwrap_or(false)
         })
 }
 
