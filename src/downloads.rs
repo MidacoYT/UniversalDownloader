@@ -10,6 +10,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -140,6 +141,30 @@ pub struct Download {
     product_id: Option<String>,
     epic_id: Option<String>,
     restored: bool,
+}
+
+impl Download {
+    /// Dossier d'installation du jeu (le paquet Xbox est téléchargé dans ce dossier).
+    pub fn install_folder(&self) -> &Path {
+        if self.product_id.is_some() {
+            self.path.parent().unwrap_or(&self.path)
+        } else {
+            &self.path
+        }
+    }
+
+    pub fn store(&self) -> crate::model::GameStore {
+        if self.epic_id.is_some() {
+            crate::model::GameStore::Epic
+        } else {
+            crate::model::GameStore::Xbox
+        }
+    }
+
+    /// Identifiant du jeu dans son catalogue (product ID Xbox ou identifiant Epic).
+    pub fn game_id(&self) -> Option<&str> {
+        self.product_id.as_deref().or(self.epic_id.as_deref())
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -885,6 +910,44 @@ impl Drop for EpicChunkCache {
     }
 }
 
+/// Débit moyen sur une fenêtre glissante : le téléchargement Epic arrive par chunks, donc on
+/// ne peut pas se contenter d'un échantillon instantané. Seuls les octets réellement
+/// téléchargés comptent (pas les chunks repris depuis le cache).
+struct SpeedMeter {
+    samples: VecDeque<(Instant, u64)>,
+    total: u64,
+}
+
+impl SpeedMeter {
+    const WINDOW: Duration = Duration::from_secs(6);
+
+    fn new() -> Self {
+        Self {
+            samples: VecDeque::from([(Instant::now(), 0)]),
+            total: 0,
+        }
+    }
+
+    fn add(&mut self, bytes: u64) {
+        self.total = self.total.saturating_add(bytes);
+        self.samples.push_back((Instant::now(), self.total));
+        while self.samples.len() > 1 && self.samples[1].0.elapsed() > Self::WINDOW {
+            self.samples.pop_front();
+        }
+    }
+
+    fn speed(&self) -> u64 {
+        let Some(&(start, bytes_at_start)) = self.samples.front() else {
+            return 0;
+        };
+        let elapsed = start.elapsed().as_secs_f64();
+        if elapsed < 0.25 || self.total == bytes_at_start {
+            return 0;
+        }
+        (self.total.saturating_sub(bytes_at_start) as f64 / elapsed) as u64
+    }
+}
+
 fn run_epic_download(
     id: u64,
     game: Game,
@@ -918,12 +981,130 @@ fn run_epic_download(
     if bytes_total == 0 {
         return Err("Epic manifest contains no chunks.".into());
     }
-    let mut received_chunks = 0u64;
+    let mut meter = SpeedMeter::new();
     let cache_dir = root.join(".ud-epic-chunks");
     fs::create_dir_all(&cache_dir)
         .map_err(|e| format!("Could not create Epic chunk cache: {e}"))?;
     let _cache_guard = EpicChunkCache(cache_dir.clone());
     let mut cached = std::collections::HashMap::<[u32; 4], PathBuf>::new();
+    let mut pending = VecDeque::new();
+    let mut received_chunks = 0u64;
+    for chunk in by_guid.values() {
+        let cache_path = cache_dir.join(format!(
+            "{:08X}{:08X}{:08X}{:08X}.chunk",
+            chunk.guid[0], chunk.guid[1], chunk.guid[2], chunk.guid[3]
+        ));
+        let reusable = fs::read(&cache_path)
+            .ok()
+            .filter(|raw| epic_chunk_data(raw).is_ok());
+        if reusable.is_some() {
+            cached.insert(chunk.guid, cache_path);
+            received_chunks = received_chunks.saturating_add(chunk.size);
+        } else {
+            pending.push_back(chunk.clone());
+        }
+    }
+    if received_chunks > 0 {
+        publish_progress(&tx, id, received_chunks, bytes_total, 0);
+    }
+
+    // Epic manifests can contain thousands of small chunks. Fetching them one at a time
+    // leaves the connection idle between requests, so use a small bounded worker pool.
+    const EPIC_CHUNK_WORKERS: usize = 8;
+    let pending_count = pending.len();
+    if pending_count > 0 {
+        let jobs = Arc::new(Mutex::new(pending));
+        let (result_tx, result_rx) = mpsc::channel();
+        let worker_count = EPIC_CHUNK_WORKERS.min(pending_count);
+        std::thread::scope(|scope| -> Result<(), String> {
+            for _ in 0..worker_count {
+                let jobs = Arc::clone(&jobs);
+                let client = client.clone();
+                let result_tx = result_tx.clone();
+                let cdns = &game.cdn_bases;
+                let cache_dir = &cache_dir;
+                let control = &control;
+                scope.spawn(move || loop {
+                    if !control.wait_until_resumed() {
+                        break;
+                    }
+                    let chunk = jobs
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .pop_front();
+                    let Some(chunk) = chunk else { break };
+                    let path = epic_chunk_path(&chunk, feature);
+                    let cache_path = cache_dir.join(format!(
+                        "{:08X}{:08X}{:08X}{:08X}.chunk",
+                        chunk.guid[0], chunk.guid[1], chunk.guid[2], chunk.guid[3]
+                    ));
+                    let fetched = (|| -> Result<(PathBuf, u64), String> {
+                        let mut last_error = None;
+                        for base in cdns {
+                            if !control.wait_until_resumed() {
+                                return Err("cancelled".into());
+                            }
+                            let url = format!("{}/{}", base.trim_end_matches('/'), path);
+                            match client
+                                .get(&url)
+                                .send()
+                                .and_then(|response| response.error_for_status())
+                                .and_then(|response| response.bytes())
+                            {
+                                Ok(data) => {
+                                    let raw = data.to_vec();
+                                    if let Err(error) = epic_chunk_data(&raw) {
+                                        last_error = Some(error);
+                                        continue;
+                                    }
+                                    fs::write(&cache_path, &raw).map_err(|error| {
+                                        format!("Could not cache Epic chunk: {error}")
+                                    })?;
+                                    return Ok((cache_path, raw.len() as u64));
+                                }
+                                Err(error) => last_error = Some(error.without_url().to_string()),
+                            }
+                        }
+                        Err(format!(
+                            "Could not fetch Epic chunk {path} from available CDNs{}.",
+                            last_error
+                                .map(|error| format!(" ({error})"))
+                                .unwrap_or_default()
+                        ))
+                    })();
+                    if result_tx.send((chunk.guid, chunk.size, fetched)).is_err() {
+                        break;
+                    }
+                });
+            }
+            drop(result_tx);
+            let mut first_error = None;
+            for _ in 0..pending_count {
+                let (guid, size, result) = result_rx
+                    .recv()
+                    .map_err(|_| "Epic chunk workers stopped unexpectedly.".to_owned())?;
+                match result {
+                    Ok((cache_path, downloaded_bytes)) => {
+                        cached.insert(guid, cache_path);
+                        received_chunks = received_chunks.saturating_add(size);
+                        meter.add(downloaded_bytes);
+                        publish_progress(&tx, id, received_chunks, bytes_total, meter.speed());
+                    }
+                    Err(error) => {
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                    }
+                }
+            }
+            if let Some(error) = first_error {
+                Err(error)
+            } else {
+                Ok(())
+            }
+        })?;
+    }
+
     for file in files {
         if !control.wait_until_resumed() {
             return Err("cancelled".into());
@@ -976,47 +1157,11 @@ fn run_epic_download(
             if !control.wait_until_resumed() {
                 return Err("cancelled".into());
             }
-            let chunk = by_guid.get(&part.guid).ok_or_else(|| {
-                format!(
+            if !by_guid.contains_key(&part.guid) {
+                return Err(format!(
                     "Epic manifest references an unknown chunk for {}",
                     file.name
-                )
-            })?;
-            let path = epic_chunk_path(chunk, feature);
-            if !cached.contains_key(&part.guid) {
-                let cache_path = cache_dir.join(format!(
-                    "{:08X}{:08X}{:08X}{:08X}.chunk",
-                    part.guid[0], part.guid[1], part.guid[2], part.guid[3]
                 ));
-                let reusable = fs::read(&cache_path)
-                    .ok()
-                    .filter(|raw| epic_chunk_data(raw).is_ok());
-                if reusable.is_none() {
-                    let mut fetched = None;
-                    for base in &game.cdn_bases {
-                        let url = format!("{}/{}", base.trim_end_matches('/'), path);
-                        if let Ok(data) = client
-                            .get(&url)
-                            .send()
-                            .and_then(|r| r.error_for_status())
-                            .and_then(|r| r.bytes())
-                        {
-                            fetched = Some(data.to_vec());
-                            break;
-                        }
-                    }
-                    let raw = fetched.ok_or_else(|| {
-                        format!("Could not fetch Epic chunk {} from available CDNs.", path)
-                    })?;
-                    if epic_chunk_data(&raw).is_err() {
-                        return Err(format!("Epic CDN returned an invalid chunk: {path}"));
-                    }
-                    fs::write(&cache_path, &raw)
-                        .map_err(|e| format!("Could not cache Epic chunk: {e}"))?;
-                }
-                cached.insert(part.guid, cache_path);
-                received_chunks = received_chunks.saturating_add(chunk.size);
-                publish_progress(&tx, id, received_chunks, bytes_total, 0);
             }
             let raw = fs::read(cached.get(&part.guid).unwrap())
                 .map_err(|e| format!("Could not read cached Epic chunk: {e}"))?;
@@ -1321,7 +1466,15 @@ fn run_xbox_download(
             0
         } else {
             let (url, expected_size) = resolve_xbox_package(&product_id)?;
-            if !transfer(&url, true, &destination, &partial_path, id, &control, &tx)? {
+            if !transfer_xbox_ranges(
+                &url,
+                expected_size,
+                &destination,
+                &partial_path,
+                id,
+                &control,
+                &tx,
+            )? {
                 return Ok(false);
             }
             expected_size
@@ -1386,11 +1539,12 @@ fn run_xbox_download(
             if (error.starts_with("Could not read the download")
                 || error.starts_with("Download request failed:")
                 || error.starts_with("The connection ended early"))
-                && partial_path.is_file()
-                && fs::metadata(&partial_path)
-                    .map(|metadata| metadata.len())
-                    .unwrap_or(0)
-                    > 0
+                && ((partial_path.is_file()
+                    && fs::metadata(&partial_path)
+                        .map(|metadata| metadata.len())
+                        .unwrap_or(0)
+                        > 0)
+                    || has_xbox_range_data(&partial_path))
             {
                 download_log(format!(
                     "Keeping partial Xbox package for resume: {} bytes at {}",
@@ -2133,6 +2287,413 @@ fn resolve_xbox_package(product_id: &str) -> Result<(String, u64), String> {
     Ok((raw_url.to_owned(), size))
 }
 
+fn transfer_xbox_ranges(
+    url: &str,
+    expected_size: u64,
+    destination: &Path,
+    partial_path: &Path,
+    id: u64,
+    control: &Control,
+    tx: &mpsc::Sender<DownloadEvent>,
+) -> Result<bool, String> {
+    const RANGE_BYTES: u64 = 16 * 1024 * 1024;
+    const WORKERS: usize = 8;
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(180))
+        .user_agent(crate::net::USER_AGENT)
+        .build()
+        .map_err(|error| format!("Could not create HTTP client: {error}"))?;
+
+    // Confirm that this particular package endpoint honors a bounded byte range. Some Xbox
+    // asset hosts return 206 for an open-ended range while ignoring its requested end.
+    let probe = client
+        .get(url)
+        .header(USER_AGENT, XBOX_ASSET_USER_AGENT)
+        .header(RANGE, "bytes=0-0")
+        .send();
+    let (total, supported) = match probe {
+        Ok(response) => {
+            let range = response
+                .headers()
+                .get(CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(parse_content_range);
+            let content_length = response
+                .headers()
+                .get(CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok());
+            let valid = response.status() == reqwest::StatusCode::PARTIAL_CONTENT
+                && range.is_some_and(|(start, end, range_total)| {
+                    start == 0
+                        && end == 0
+                        && range_total > 1
+                        && (expected_size == 0 || range_total == expected_size)
+                })
+                && content_length == Some(1);
+            let total = range.map(|(_, _, total)| total).unwrap_or(expected_size);
+            drop(response);
+            (total, valid)
+        }
+        Err(error) => {
+            download_log(format!(
+                "Xbox byte-range probe failed; using the regular stream: {}",
+                error.without_url()
+            ));
+            (expected_size, false)
+        }
+    };
+    if !supported || total == 0 {
+        download_log(format!(
+            "Xbox server does not confirm bounded ranges; using the regular stream (expected_size={expected_size})"
+        ));
+        return transfer(url, true, destination, partial_path, id, control, tx);
+    }
+    download_log(format!(
+        "Xbox server confirmed byte ranges: total={total}, segment_size={RANGE_BYTES}, workers={WORKERS}"
+    ));
+
+    let mut jobs = VecDeque::new();
+    let mut already_received = 0u64;
+    let mut segment_start = 0u64;
+    while segment_start < total {
+        let segment_end = segment_start
+            .saturating_add(RANGE_BYTES - 1)
+            .min(total - 1);
+        let segment_path = xbox_segment_path(partial_path, segment_start);
+        let expected_segment = segment_end - segment_start + 1;
+        let mut existing = fs::metadata(&segment_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        if existing > expected_segment {
+            fs::remove_file(&segment_path)
+                .map_err(|error| format!("Could not reset an Xbox download segment: {error}"))?;
+            existing = 0;
+        }
+        if existing == expected_segment {
+            already_received = already_received.saturating_add(existing);
+        } else {
+            jobs.push_back((segment_start, segment_end));
+            already_received = already_received.saturating_add(existing);
+        }
+        segment_start = segment_end + 1;
+    }
+    let progress_received = Arc::new(AtomicU64::new(already_received));
+    let speed_meter = Arc::new(Mutex::new(SpeedMeter::new()));
+    let job_count = jobs.len();
+    if job_count > 0 {
+        let jobs = Arc::new(Mutex::new(jobs));
+        let (result_tx, result_rx) = mpsc::channel();
+        let worker_count = WORKERS.min(job_count);
+        std::thread::scope(|scope| -> Result<(), String> {
+            for _ in 0..worker_count {
+                let jobs = Arc::clone(&jobs);
+                let client = client.clone();
+                let result_tx = result_tx.clone();
+                let progress_received = Arc::clone(&progress_received);
+                let speed_meter = Arc::clone(&speed_meter);
+                scope.spawn(move || loop {
+                    if control.get() != ControlState::Running {
+                        break;
+                    }
+                    let job = jobs
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .pop_front();
+                    let Some((start, end)) = job else { break };
+                    let path = xbox_segment_path(partial_path, start);
+                    let result = download_xbox_range(
+                        &client,
+                        url,
+                        total,
+                        start,
+                        end,
+                        &path,
+                        id,
+                        control,
+                        tx,
+                        &progress_received,
+                        &speed_meter,
+                    );
+                    let _ = result_tx.send(result);
+                });
+            }
+            drop(result_tx);
+            let mut completed = 0;
+            let mut first_error = None;
+            while completed < job_count {
+                match result_rx.recv() {
+                    Ok(Ok(())) => completed += 1,
+                    Ok(Err(error)) => {
+                        completed += 1;
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            if control.get() == ControlState::Paused {
+                return Err("paused".into());
+            }
+            if control.get() == ControlState::Cancelled {
+                return Err("cancelled".into());
+            }
+            if let Some(error) = first_error {
+                return Err(error);
+            }
+            if completed != job_count {
+                return Err("Xbox range workers stopped unexpectedly.".into());
+            }
+            Ok(())
+        })?;
+    }
+
+    if control.get() == ControlState::Cancelled {
+        remove_xbox_segments(partial_path, total)?;
+        return Ok(false);
+    }
+    if !control.wait_until_resumed() {
+        remove_xbox_segments(partial_path, total)?;
+        return Ok(false);
+    }
+    let mut output = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(partial_path)
+        .map_err(|error| format!("Could not assemble the Xbox package: {error}"))?;
+    let mut segment_start = 0u64;
+    let mut buffer = vec![0; 1024 * 1024];
+    while segment_start < total {
+        if !control.wait_until_resumed() {
+            drop(output);
+            remove_partial(partial_path)?;
+            remove_xbox_segments(partial_path, total)?;
+            return Ok(false);
+        }
+        let segment_end = segment_start
+            .saturating_add(RANGE_BYTES - 1)
+            .min(total - 1);
+        let segment_path = xbox_segment_path(partial_path, segment_start);
+        let expected_segment = segment_end - segment_start + 1;
+        let metadata = fs::metadata(&segment_path)
+            .map_err(|error| format!("Missing Xbox download segment: {error}"))?;
+        if metadata.len() != expected_segment {
+            return Err("An Xbox download segment is incomplete.".into());
+        }
+        let mut input = File::open(&segment_path)
+            .map_err(|error| format!("Could not open Xbox download segment: {error}"))?;
+        loop {
+            let count = input
+                .read(&mut buffer)
+                .map_err(|error| format!("Could not read Xbox download segment: {error}"))?;
+            if count == 0 {
+                break;
+            }
+            output
+                .write_all(&buffer[..count])
+                .map_err(|error| format!("Could not assemble Xbox package: {error}"))?;
+        }
+        segment_start = segment_end + 1;
+    }
+    output
+        .flush()
+        .and_then(|_| output.sync_all())
+        .map_err(|error| format!("Could not finish assembling Xbox package: {error}"))?;
+    drop(output);
+    remove_xbox_segments(partial_path, total)?;
+    publish_progress(tx, id, total, total, 0);
+    finish_file(partial_path, destination)?;
+    Ok(true)
+}
+
+fn download_xbox_range(
+    client: &Client,
+    url: &str,
+    total: u64,
+    start: u64,
+    end: u64,
+    segment_path: &Path,
+    id: u64,
+    control: &Control,
+    tx: &mpsc::Sender<DownloadEvent>,
+    progress_received: &AtomicU64,
+    speed_meter: &Mutex<SpeedMeter>,
+) -> Result<(), String> {
+    let expected = end - start + 1;
+    let mut offset = fs::metadata(segment_path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    if offset > expected {
+        fs::remove_file(segment_path)
+            .map_err(|error| format!("Could not reset Xbox range segment: {error}"))?;
+        offset = 0;
+    }
+    let mut retries = 0u8;
+    while offset < expected {
+        if control.get() == ControlState::Paused {
+            return Err("paused".into());
+        }
+        if control.get() == ControlState::Cancelled {
+            return Err("cancelled".into());
+        }
+        let request_start = start + offset;
+        let mut response = client
+            .get(url)
+            .header(USER_AGENT, XBOX_ASSET_USER_AGENT)
+            .header(RANGE, format!("bytes={request_start}-{end}"))
+            .send()
+            .map_err(|error| format!("Download request failed: {}", error.without_url()))?;
+        if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+            return Err(format!(
+                "Download request failed: Xbox range request returned {}.",
+                response.status()
+            ));
+        }
+        let range = response
+            .headers()
+            .get(CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(parse_content_range)
+            .ok_or_else(|| "Xbox server returned an invalid Content-Range.".to_owned())?;
+        if range != (request_start, end, total) {
+            return Err(format!(
+                "Xbox server returned unexpected Content-Range bytes {}-{}/{} for requested bytes {request_start}-{end}/{total}.",
+                range.0, range.1, range.2
+            ));
+        }
+        let mut output = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(segment_path)
+            .map_err(|error| format!("Could not write Xbox range segment: {error}"))?;
+        let mut buffer = vec![0; 256 * 1024];
+        let mut last_report = Instant::now();
+        let mut read_error = None;
+        loop {
+            if control.get() != ControlState::Running {
+                output.flush().map_err(|error| error.to_string())?;
+                return Err(if control.get() == ControlState::Paused {
+                    "paused".into()
+                } else {
+                    "cancelled".into()
+                });
+            }
+            match response.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => {
+                    if offset.saturating_add(count as u64) > expected {
+                        return Err("Xbox server sent more bytes than requested.".into());
+                    }
+                    output
+                        .write_all(&buffer[..count])
+                        .map_err(|error| format!("Could not write Xbox range segment: {error}"))?;
+                    offset += count as u64;
+                    progress_received.fetch_add(count as u64, Ordering::Relaxed);
+                    speed_meter
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .add(count as u64);
+                    if last_report.elapsed() >= Duration::from_millis(250) {
+                        let speed = speed_meter
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .speed();
+                        publish_progress(
+                            tx,
+                            id,
+                            progress_received.load(Ordering::Relaxed).min(total),
+                            total,
+                            speed,
+                        );
+                        last_report = Instant::now();
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    read_error = Some(error.to_string());
+                    break;
+                }
+            }
+        }
+        output
+            .flush()
+            .map_err(|error| format!("Could not flush Xbox range segment: {error}"))?;
+        drop(output);
+        if offset == expected {
+            return Ok(());
+        }
+        retries = retries.saturating_add(1);
+        if retries > MAX_DOWNLOAD_READ_RETRIES {
+            return Err(format!(
+                "Could not read the download after {MAX_DOWNLOAD_READ_RETRIES} retries: {} bytes of range received{}",
+                offset,
+                read_error
+                    .map(|error| format!(" ({error})"))
+                    .unwrap_or_default()
+            ));
+        }
+        let pause = Duration::from_millis(250 * u64::from(retries.min(20)));
+        let until = Instant::now() + pause;
+        while Instant::now() < until {
+            if control.get() != ControlState::Running {
+                return Err(if control.get() == ControlState::Paused {
+                    "paused".into()
+                } else {
+                    "cancelled".into()
+                });
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    Ok(())
+}
+
+fn xbox_segment_path(partial_path: &Path, start: u64) -> PathBuf {
+    let mut name = partial_path
+        .file_name()
+        .unwrap_or_default()
+        .to_os_string();
+    name.push(format!(".range.{start}"));
+    partial_path.with_file_name(name)
+}
+
+fn has_xbox_range_data(partial_path: &Path) -> bool {
+    let Some(parent) = partial_path.parent() else {
+        return false;
+    };
+    let Some(prefix) = partial_path.file_name() else {
+        return false;
+    };
+    let prefix = format!("{}.range.", prefix.to_string_lossy());
+    fs::read_dir(parent)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .any(|entry| {
+            entry.file_name().to_string_lossy().starts_with(&prefix)
+                && entry.metadata().map(|metadata| metadata.len() > 0).unwrap_or(false)
+        })
+}
+
+fn remove_xbox_segments(partial_path: &Path, total: u64) -> Result<(), String> {
+    const RANGE_BYTES: u64 = 16 * 1024 * 1024;
+    let mut start = 0u64;
+    while start < total {
+        let path = xbox_segment_path(partial_path, start);
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("Could not remove Xbox range segment: {error}")),
+        }
+        start = start.saturating_add(RANGE_BYTES);
+    }
+    Ok(())
+}
+
 fn transfer(
     url: &str,
     xbox_package: bool,
@@ -2387,6 +2948,13 @@ fn parse_content_range_start(value: &str) -> Option<u64> {
         .0
         .parse()
         .ok()
+}
+
+fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
+    let range = value.strip_prefix("bytes ")?;
+    let (positions, total) = range.split_once('/')?;
+    let (start, end) = positions.split_once('-')?;
+    Some((start.parse().ok()?, end.parse().ok()?, total.parse().ok()?))
 }
 
 fn parse_content_range_total(value: &str) -> Option<u64> {

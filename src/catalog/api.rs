@@ -99,7 +99,11 @@ pub fn parse_epic_catalog(data: &Value) -> Result<Vec<Game>, String> {
         if let Some(version) = item.get("buildVersion").and_then(Value::as_str) {
             game.last_modified = version.to_owned();
         }
-        if let Some(release) = item.get("releaseDate").and_then(Value::as_str) {
+        if let Some(release) = item
+            .get("releaseDate")
+            .and_then(Value::as_str)
+            .filter(|release| crate::util::is_known_release(release))
+        {
             game.release_date_sort = release.to_owned();
             game.release = format_date(release);
         }

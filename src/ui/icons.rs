@@ -41,6 +41,5 @@ icons! {
     check => "check.svg",
     folder_check => "folder-check.svg",
     refresh => "refresh.svg",
-    shortcut => "shortcut.svg",
     trash => "trash.svg",
 }

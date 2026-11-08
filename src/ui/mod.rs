@@ -5,6 +5,7 @@
 
 pub mod catalog_page;
 pub mod downloads_page;
+pub mod download_location_modal;
 pub mod game_card;
 pub mod game_modal;
 pub mod home;
@@ -53,6 +54,8 @@ pub enum Action {
         name: String,
         store: crate::model::GameStore,
     },
+    ConfirmDownload { directory: String },
+    DismissDownload,
     CloseGame,
     PlayTrailer {
         title: String,
@@ -67,12 +70,6 @@ pub enum Action {
     PlayGame {
         name: String,
         path: PathBuf,
-    },
-    CreateDesktopShortcut {
-        name: String,
-        path: PathBuf,
-        store: crate::model::GameStore,
-        launch_exe: Option<String>,
     },
     AskUninstall(LibraryEntry),
     ConfirmUninstall,

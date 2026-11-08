@@ -13,6 +13,7 @@ pub const TEXT_SUBTLE: Color32 = Color32::from_rgb(155, 151, 172);
 pub const GREEN: Color32 = Color32::from_rgb(34, 197, 94);
 pub const EMERALD: Color32 = Color32::from_rgb(16, 185, 129);
 pub const BLUE: Color32 = Color32::from_rgb(59, 130, 246);
+pub const EPIC_BLUE: Color32 = Color32::from_rgb(0, 120, 242);
 pub const GOLD: Color32 = Color32::from_rgb(251, 191, 36);
 pub const CYAN: Color32 = Color32::from_rgb(6, 182, 212);
 pub const DANGER: Color32 = Color32::from_rgb(153, 27, 27);

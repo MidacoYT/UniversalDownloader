@@ -160,7 +160,11 @@ fn hero(ui: &mut egui::Ui, game: &Game, texture: Option<&TextureHandle>) -> bool
         rect.left_bottom() + egui::vec2(20.0, -82.0),
         egui::vec2(112.0, 22.0),
     );
-    painter.rect_filled(badge, 6.0, theme::GREEN);
+    let badge_color = match game.store {
+        GameStore::Xbox => theme::GREEN,
+        GameStore::Epic => theme::EPIC_BLUE,
+    };
+    painter.rect_filled(badge, 6.0, badge_color);
     painter.text(
         badge.center(),
         egui::Align2::CENTER_CENTER,
@@ -247,6 +251,10 @@ fn body(
 
     heading(ui, "Additional Information");
     info_cards(ui, game);
+    if game.store == GameStore::Epic && !game.store_info_status.is_empty() {
+        ui.add_space(6.0);
+        ui.label(widgets::muted(&game.store_info_status, 11.0));
+    }
     links(ui, game);
     genres(ui, game);
 
@@ -385,36 +393,25 @@ fn stats_row(ui: &mut egui::Ui, game: &Game) {
 }
 
 fn info_cards(ui: &mut egui::Ui, game: &Game) {
-    let mut right = vec![("Release date", game.release.as_str())];
     let recommendation = game
         .critic_recommend
         .map(|percent| format!("OpenCritic recommends · {percent}%"));
+    let mut left = vec![
+        ("Publisher", game.publisher.as_str()),
+        ("Developer", game.developer.as_str()),
+    ];
+    if let Some(recommendation) = recommendation.as_deref() {
+        left.push(("Critic sentiment", recommendation));
+    }
+    let mut right = vec![("Release date", game.release.as_str())];
     if !game.platform.is_empty() {
         right.push(("Platforms", game.platform.as_str()));
     }
-    let gap = 10.0;
-    let column_width = ((ui.available_width() - gap) * 0.5).max(1.0);
-    ui.horizontal(|row| {
-        row.spacing_mut().item_spacing.x = gap;
-        row.allocate_ui_with_layout(
-            egui::vec2(column_width, 1.0),
-            egui::Layout::top_down(egui::Align::Min),
-            |column| info_card(column, &{
-            let mut rows = vec![
-                ("Publisher", game.publisher.as_str()),
-                ("Developer", game.developer.as_str()),
-            ];
-            if let Some(recommendation) = recommendation.as_deref() {
-                rows.push(("Critic sentiment", recommendation));
-            }
-            rows
-        }),
-        );
-        row.allocate_ui_with_layout(
-            egui::vec2(column_width, 1.0),
-            egui::Layout::top_down(egui::Align::Min),
-            |column| info_card(column, &right),
-        );
+    // `columns` : deux colonnes égales, alignées en haut (un `horizontal` centrait
+    // verticalement la carte la plus courte, d'où le décalage).
+    ui.columns(2, |columns| {
+        info_card(&mut columns[0], &left);
+        info_card(&mut columns[1], &right);
     });
 }
 
@@ -425,7 +422,7 @@ fn info_card(ui: &mut egui::Ui, rows: &[(&str, &str)]) {
         .corner_radius(8)
         .inner_margin(egui::Margin::same(12))
         .show(ui, |ui| {
-            ui.set_max_width(ui.available_width());
+            ui.set_width(ui.available_width());
             for (index, (label, value)) in rows.iter().enumerate() {
                 if index > 0 {
                     ui.add_space(12.0);
@@ -791,8 +788,14 @@ fn footer(ui: &mut egui::Ui, game: &Game, out: &mut Vec<Action>) {
                     store: game.store,
                 });
             }
-            if !game.egdata_url.is_empty() && ui.button("More game info").clicked() {
-                let _ = webbrowser::open(&game.egdata_url);
+            // Page officielle Epic en priorité ; l'ancien lien tiers ne sert que de secours.
+            let info_url = if game.store_url.is_empty() {
+                game.egdata_url.as_str()
+            } else {
+                game.store_url.as_str()
+            };
+            if !info_url.is_empty() && ui.button("More game info").clicked() {
+                let _ = webbrowser::open(info_url);
             }
         }
     });

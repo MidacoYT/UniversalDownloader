@@ -157,29 +157,27 @@ fn download_card(
                         details.horizontal(|line| {
                             line.add(icons::download(13.0));
                             line.label(status_text(&entry.status));
+                            let mut parts = Vec::new();
                             if entry.total > 0 {
-                                line.label(widgets::muted(
-                                    format!(
-                                        "{} / {}",
-                                        format_size(entry.received),
-                                        format_size(entry.total)
-                                    ),
-                                    11.0,
+                                parts.push(format!(
+                                    "{} / {}",
+                                    format_size(entry.received),
+                                    format_size(entry.total)
                                 ));
                             } else if entry.received > 0 {
-                                line.label(widgets::muted(format_size(entry.received), 11.0));
+                                parts.push(format_size(entry.received));
                             }
                             if entry.speed > 0 {
-                                line.label(widgets::muted(format_speed(entry.speed), 11.0));
+                                parts.push(format_speed(entry.speed));
                             }
                             if entry.total > entry.received && entry.speed > 0 {
-                                line.label(widgets::muted(
-                                    format!(
-                                        "ETA {}",
-                                        format_eta(entry.total - entry.received, entry.speed)
-                                    ),
-                                    11.0,
+                                parts.push(format!(
+                                    "{} left",
+                                    format_eta(entry.total - entry.received, entry.speed)
                                 ));
+                            }
+                            if !parts.is_empty() {
+                                line.label(widgets::muted(parts.join("  ·  "), 11.0));
                             }
                         });
                         details.add_space(5.0);
@@ -190,15 +188,18 @@ fn download_card(
                                 let percent_width = 42.0;
                                 let bar_width =
                                     (progress_row.available_width() - percent_width).max(24.0);
-                                progress_row.add_sized(
-                                    [bar_width, 8.0],
-                                    egui::ProgressBar::new(progress).corner_radius(4).fill(
-                                        if entry.status == DownloadStatus::Paused {
+                                // `desired_height` : `add_sized` ne réduit pas la barre, elle
+                                // garde sa hauteur par défaut.
+                                progress_row.add(
+                                    egui::ProgressBar::new(progress)
+                                        .desired_width(bar_width)
+                                        .desired_height(4.0)
+                                        .corner_radius(2)
+                                        .fill(if entry.status == DownloadStatus::Paused {
                                             theme::GOLD
                                         } else {
                                             theme::ACCENT_LIGHT
-                                        },
-                                    ),
+                                        }),
                                 );
                                 progress_row.add_sized(
                                     [percent_width, 18.0],
@@ -213,8 +214,8 @@ fn download_card(
                         } else {
                             details.add(
                                 egui::ProgressBar::new(0.0)
-                                    .desired_height(6.0)
-                                    .corner_radius(4)
+                                    .desired_height(4.0)
+                                    .corner_radius(2)
                                     .animate(true),
                             );
                         }
@@ -467,11 +468,11 @@ fn format_eta(remaining: u64, bytes_per_second: u64) -> String {
     }
     let seconds = remaining.div_ceil(bytes_per_second);
     if seconds < 60 {
-        format!("~{seconds}s")
+        format!("{seconds}s")
     } else if seconds < 3600 {
-        format!("~{}m {}s", seconds / 60, seconds % 60)
+        format!("{}m {:02}s", seconds / 60, seconds % 60)
     } else {
-        format!("~{}h {}m", seconds / 3600, (seconds % 3600) / 60)
+        format!("{}h {:02}m", seconds / 3600, (seconds % 3600) / 60)
     }
 }
 

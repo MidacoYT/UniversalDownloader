@@ -1,5 +1,6 @@
 //! Composition de l'application : état global, routage des pages, application des actions.
 use crate::catalog::Catalog;
+use crate::catalog::epic_store::EpicStoreInfo;
 use crate::downloads::DownloadManager;
 use crate::images::ImageCache;
 use crate::library::{self, Library, LibraryEntry};
@@ -8,18 +9,29 @@ use crate::player::TrailerPlayer;
 use crate::settings::Settings;
 use crate::ui::game_modal::ModalState;
 use crate::ui::{
-    Action, CatalogSelection, Page, catalog_page, downloads_page, game_modal, home, library_page,
-    settings_page, sidebar, theme, trailer_overlay, uninstall_modal, updates_page,
+    Action, CatalogSelection, Page, catalog_page, download_location_modal, downloads_page,
+    game_modal, home, library_page, settings_page, sidebar, theme, trailer_overlay,
+    uninstall_modal, updates_page,
 };
 use crate::updates::UpdateCheck;
 use eframe::egui;
 use fluent_egui::winui::prelude::*;
 use fluent_egui::winui::{self, BackdropKind, FluentTheme};
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 const SIDEBAR_W: f32 = 232.0;
 const MAIN_MARGIN: f32 = 28.0;
+
+struct PendingDownload {
+    id: String,
+    name: String,
+    store: GameStore,
+    directory: String,
+    generation: u64,
+}
 
 pub struct App {
     page: Page,
@@ -27,13 +39,21 @@ pub struct App {
     epic_catalog: Catalog,
     epic_stats_tx: Sender<(String, Result<(Option<u8>, Option<u8>), String>)>,
     epic_stats_rx: Receiver<(String, Result<(Option<u8>, Option<u8>), String>)>,
+    epic_info_tx: Sender<(String, Result<Option<EpicStoreInfo>, String>)>,
+    epic_info_rx: Receiver<(String, Result<Option<EpicStoreInfo>, String>)>,
+    /// Requêtes boutique Epic en cours (garde l'interface réveillée jusqu'à la réponse).
+    epic_info_pending: usize,
+    shortcut_tx: Sender<String>,
+    shortcut_rx: Receiver<String>,
+    shortcut_checked: HashSet<u64>,
     selected_catalog: CatalogSelection,
     combined_catalog: Catalog,
     library: Library,
     settings: Settings,
     updates: UpdateCheck,
     downloads: DownloadManager,
-    download_name: String,
+    pending_download: Option<PendingDownload>,
+    download_prompt_generation: u64,
     images: ImageCache,
     selected: Option<(GameStore, String)>,
     modal: ModalState,
@@ -47,19 +67,28 @@ pub struct App {
 impl App {
     pub fn new() -> Self {
         let (epic_stats_tx, epic_stats_rx) = mpsc::channel();
+        let (shortcut_tx, shortcut_rx) = mpsc::channel();
+        let (epic_info_tx, epic_info_rx) = mpsc::channel();
         let mut app = Self {
             page: Page::Home,
             catalog: Catalog::new(GameStore::Xbox),
             epic_catalog: Catalog::new(GameStore::Epic),
             epic_stats_tx,
             epic_stats_rx,
+            epic_info_tx,
+            epic_info_rx,
+            epic_info_pending: 0,
+            shortcut_tx,
+            shortcut_rx,
+            shortcut_checked: HashSet::new(),
             selected_catalog: CatalogSelection::All,
             combined_catalog: Catalog::new(GameStore::Xbox),
             library: Library::new(),
             settings: Settings::load(),
             updates: UpdateCheck::new(),
             downloads: DownloadManager::new(),
-            download_name: String::new(),
+            pending_download: None,
+            download_prompt_generation: 0,
             images: ImageCache::new(),
             selected: None,
             modal: ModalState::default(),
@@ -92,6 +121,71 @@ impl App {
         self.epic_catalog.mark_dirty();
     }
 
+    /// Complète une fois la fiche d'un jeu Epic : infos officielles de la boutique Epic Games
+    /// (éditeur, développeur, date, page) et note OpenCritic.
+    fn request_epic_details(&mut self, id: &str) {
+        let Some(game) = self
+            .epic_catalog
+            .games
+            .iter_mut()
+            .find(|game| game.id == id)
+        else {
+            return;
+        };
+        if !game.store_info_requested {
+            game.store_info_requested = true;
+            let (game_id, name) = (game.id.clone(), game.name.clone());
+            let tx = self.epic_info_tx.clone();
+            self.epic_info_pending += 1;
+            std::thread::spawn(move || {
+                let _ = tx.send((game_id, crate::catalog::epic_store::fetch(&name)));
+            });
+        }
+        if !game.egdata_offer_id.is_empty() && !game.epic_stats_requested {
+            game.epic_stats_requested = true;
+            let (game_id, offer_id) = (game.id.clone(), game.egdata_offer_id.clone());
+            let tx = self.epic_stats_tx.clone();
+            std::thread::spawn(move || {
+                let result = crate::catalog::api::fetch_epic_critic_stats(&offer_id);
+                let _ = tx.send((game_id, result));
+            });
+        }
+    }
+
+    /// Crée le raccourci bureau sans bloquer l'interface (PowerShell prend ~1 s).
+    fn create_shortcut_in_background(
+        &self,
+        name: String,
+        folder: PathBuf,
+        store: GameStore,
+        game_id: Option<String>,
+    ) {
+        let catalog = match store {
+            GameStore::Xbox => &self.catalog,
+            GameStore::Epic => &self.epic_catalog,
+        };
+        let product_id = game_id.clone();
+        let launch_exe = game_id
+            .and_then(|id| catalog.games.iter().find(|game| game.id == id))
+            .map(|game| game.launch_exe.clone())
+            .filter(|exe| !exe.is_empty());
+        let tx = self.shortcut_tx.clone();
+        std::thread::spawn(move || {
+            let message =
+                match library::create_shortcut(
+                    &name,
+                    &folder,
+                    store,
+                    launch_exe.as_deref(),
+                    product_id.as_deref(),
+                ) {
+                    Ok(path) => format!("Desktop shortcut created: {}", path.display()),
+                    Err(error) => format!("Could not create desktop shortcut: {error}"),
+                };
+            let _ = tx.send(message);
+        });
+    }
+
     /// Intègre les résultats des threads d'arrière-plan.
     fn poll(&mut self, ctx: &egui::Context) {
         self.images.poll(ctx);
@@ -120,27 +214,102 @@ impl App {
                 }
             }
         }
+        let epic_info_updates: Vec<_> = self.epic_info_rx.try_iter().collect();
+        let epic_info_changed = !epic_info_updates.is_empty();
+        self.epic_info_pending = self.epic_info_pending.saturating_sub(epic_info_updates.len());
+        for (id, result) in epic_info_updates {
+            let Some(game) = self
+                .epic_catalog
+                .games
+                .iter_mut()
+                .find(|game| game.id == id)
+            else {
+                continue;
+            };
+            match result {
+                Ok(Some(info)) => {
+                    info.apply(game);
+                    game.store_info_status = "Source: Epic Games store".into();
+                }
+                Ok(None) => {
+                    game.store_info_status =
+                        "No matching Epic Games store listing — showing catalog data.".into();
+                }
+                Err(error) => {
+                    game.store_info_status =
+                        format!("Epic Games store info unavailable: {error}");
+                }
+            }
+        }
+        if epic_info_changed {
+            self.epic_catalog.mark_dirty();
+        }
         let library_changed = self.library.poll();
+        if self.library.poll_uninstall() {
+            self.rematch_library();
+        }
         self.updates.poll();
         if self.updates.take_restart_requested() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        let completed_before = self
+        let completed_before: HashSet<u64> = self
             .downloads
             .entries
             .iter()
             .filter(|entry| entry.status == crate::downloads::DownloadStatus::Completed)
-            .count();
+            .map(|entry| entry.id)
+            .collect();
         self.downloads.poll();
         let download_changed_library = self.downloads.take_library_change();
-        let completed_after = self
+        // Comme Xbox ou Epic : le raccourci bureau est créé automatiquement
+        // dès qu'une installation vient de se terminer.
+        let new_installs: Vec<_> = self
             .downloads
             .entries
             .iter()
-            .filter(|entry| entry.status == crate::downloads::DownloadStatus::Completed)
-            .count();
-        if completed_after > completed_before || download_changed_library {
+            .filter(|entry| {
+                entry.status == crate::downloads::DownloadStatus::Completed
+                    && !completed_before.contains(&entry.id)
+            })
+            .map(|entry| {
+                (
+                    entry.name.clone(),
+                    entry.install_folder().to_path_buf(),
+                    entry.store(),
+                    entry.game_id().map(str::to_owned),
+                )
+            })
+            .collect();
+        let shortcuts_pending: Vec<_> = if self.settings.auto_shortcut {
+            self.downloads
+                .entries
+                .iter()
+                .filter(|entry| {
+                    entry.status == crate::downloads::DownloadStatus::Completed
+                        && !self.shortcut_checked.contains(&entry.id)
+                })
+                .map(|entry| {
+                    (
+                        entry.id,
+                        entry.name.clone(),
+                        entry.install_folder().to_path_buf(),
+                        entry.store(),
+                        entry.game_id().map(str::to_owned),
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if !new_installs.is_empty() || download_changed_library {
             self.scan_library();
+        }
+        for (id, name, folder, store, game_id) in shortcuts_pending {
+            self.shortcut_checked.insert(id);
+            self.create_shortcut_in_background(name, folder, store, game_id);
+        }
+        if let Some(message) = self.shortcut_rx.try_iter().last() {
+            self.library.status = message;
         }
         if catalog_changed || epic_catalog_changed || library_changed {
             self.rematch_library();
@@ -149,7 +318,10 @@ impl App {
             || self.epic_catalog.is_loading()
             || epic_catalog_changed
             || epic_stats_changed
+            || epic_info_changed
+            || self.epic_info_pending > 0
             || self.library.is_scanning()
+            || self.library.is_uninstalling()
             || self.updates.is_loading()
             || self.downloads.is_active()
         {
@@ -234,60 +406,51 @@ impl App {
             Action::OpenGame { id, store } => {
                 self.modal = ModalState::default();
                 if store == GameStore::Epic {
-                    let request = self
-                        .epic_catalog
-                        .games
-                        .iter_mut()
-                        .find(|game| game.id == id)
-                        .and_then(|game| {
-                            if game.egdata_offer_id.is_empty() || game.epic_stats_requested {
-                                None
-                            } else {
-                                game.epic_stats_requested = true;
-                                Some((game.id.clone(), game.egdata_offer_id.clone()))
-                            }
-                        });
-                    if let Some((game_id, offer_id)) = request {
-                        let tx = self.epic_stats_tx.clone();
-                        std::thread::spawn(move || {
-                            let result = crate::catalog::api::fetch_epic_critic_stats(&offer_id);
-                            let _ = tx.send((game_id, result));
-                        });
-                    }
+                    self.request_epic_details(&id);
                 }
                 self.selected = Some((store, id));
             }
             Action::PrepareDownload { id, name, store } => {
                 self.trailer.close();
                 self.selected = None;
-                self.download_name = name;
-                self.page = Page::Downloads;
-                match store {
-                    GameStore::Xbox => {
-                        if let Err(error) = self.downloads.start_xbox(
-                            &id,
-                            &self.download_name,
-                            &self.settings.library_dir,
-                        ) {
-                            self.downloads.notice = error;
-                        } else {
+                self.download_prompt_generation = self.download_prompt_generation.wrapping_add(1);
+                self.pending_download = Some(PendingDownload {
+                    id,
+                    name,
+                    store,
+                    directory: self.settings.library_dir.clone(),
+                    generation: self.download_prompt_generation,
+                });
+            }
+            Action::ConfirmDownload { directory } => {
+                if let Some(pending) = self.pending_download.take() {
+                    self.page = Page::Downloads;
+                    let result = match pending.store {
+                        GameStore::Xbox => self.downloads.start_xbox(
+                            &pending.id,
+                            &pending.name,
+                            &directory,
+                        ),
+                        GameStore::Epic => {
+                            if let Some(game) = self.epic_catalog.game(&pending.id).cloned() {
+                                self.downloads.start_epic(&game, &directory)
+                            } else {
+                                Err("Epic game metadata is unavailable. Refresh the Epic catalog and try again.".into())
+                            }
+                        }
+                    };
+                    match result {
+                        Ok(()) => {
+                            self.settings.library_dir = directory;
+                            self.settings.persist();
                             self.scan_library();
                         }
-                    }
-                    GameStore::Epic => {
-                        if let Some(game) = self.epic_catalog.game(&id).cloned() {
-                            if let Err(error) =
-                                self.downloads.start_epic(&game, &self.settings.library_dir)
-                            {
-                                self.downloads.notice = error;
-                            } else {
-                                self.scan_library();
-                            }
-                        } else {
-                            self.downloads.notice = "Epic game metadata is unavailable. Refresh the Epic catalog and try again.".into();
-                        }
+                        Err(error) => self.downloads.notice = error,
                     }
                 }
+            }
+            Action::DismissDownload => {
+                self.pending_download = None;
             }
             Action::CloseGame => {
                 self.trailer.close();
@@ -322,24 +485,12 @@ impl App {
                     Err(error) => error,
                 };
             }
-            Action::CreateDesktopShortcut {
-                name,
-                path,
-                store,
-                launch_exe,
-            } => {
-                self.library.status =
-                    match library::create_shortcut(&name, &path, store, launch_exe.as_deref()) {
-                        Ok(path) => format!("Desktop shortcut created: {}", path.display()),
-                        Err(error) => format!("Could not create desktop shortcut: {error}"),
-                    };
-            }
             Action::AskUninstall(entry) => self.pending_uninstall = Some(entry),
             Action::DismissUninstall => self.pending_uninstall = None,
             Action::ConfirmUninstall => {
                 if let Some(entry) = self.pending_uninstall.take() {
-                    self.library.uninstall(&entry, &self.settings.library_dir);
-                    self.rematch_library();
+                    self.library
+                        .start_uninstall(entry, &self.settings.library_dir);
                 }
             }
         }
@@ -459,6 +610,19 @@ impl App {
         }
         if let Some(entry) = &self.pending_uninstall {
             uninstall_modal::show(ctx, entry, out);
+        }
+        if let Some(pending) = &mut self.pending_download {
+            download_location_modal::show(
+                ctx,
+                &pending.name,
+                pending.store,
+                &mut pending.directory,
+                pending.generation,
+                out,
+            );
+        }
+        if let Some(progress) = self.library.uninstall_progress() {
+            uninstall_modal::show_progress(ctx, progress);
         }
         trailer_overlay::show(ctx, frame, &mut self.trailer, out);
     }

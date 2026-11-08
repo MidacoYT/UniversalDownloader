@@ -221,21 +221,6 @@ fn buttons(ui: &mut egui::Ui, row: &LibraryRow, out: &mut Vec<Action>) {
     }
     if let Some(game) = row.game {
         if ui
-            .add(egui::Button::image(icons::shortcut(15.0)).min_size(egui::vec2(34.0, 30.0)))
-            .on_hover_text(format!(
-                "Create a desktop shortcut on {}",
-                crate::library::desktop_hint()
-            ))
-            .clicked()
-        {
-            out.push(Action::CreateDesktopShortcut {
-                name: game.display_name().to_owned(),
-                path: entry.path.clone(),
-                store: game.store,
-                launch_exe: (!game.launch_exe.is_empty()).then(|| game.launch_exe.clone()),
-            });
-        }
-        if ui
             .add(egui::Button::image(icons::info(15.0)).min_size(egui::vec2(34.0, 30.0)))
             .on_hover_text("View details")
             .clicked()

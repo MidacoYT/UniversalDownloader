@@ -1,7 +1,7 @@
 //! Carte d'un jeu dans la grille du catalogue.
 use super::{Action, icons, theme, widgets};
 use crate::images;
-use crate::model::Game;
+use crate::model::{Game, GameStore};
 use eframe::egui::{self, Color32, RichText};
 
 pub fn show(
@@ -83,13 +83,18 @@ fn art(card: &mut egui::Ui, game: &Game, texture: Option<&egui::TextureHandle>, 
         ),
     }
 
-    let tag = if game.ea_play {
-        "EA PLAY"
-    } else {
-        game.genres
+    let tag = match game.store {
+        GameStore::Xbox if game.ea_play => "EA PLAY",
+        GameStore::Xbox => game
+            .genres
             .first()
             .map(String::as_str)
-            .unwrap_or("GAME PASS")
+            .unwrap_or("GAME PASS"),
+        GameStore::Epic => game
+            .genres
+            .first()
+            .map(String::as_str)
+            .unwrap_or("EPIC GAMES"),
     };
     let badge_font = egui::FontId::proportional(11.0);
     let text_width = card
@@ -114,6 +119,7 @@ fn art(card: &mut egui::Ui, game: &Game, texture: Option<&egui::TextureHandle>, 
 fn genre_color(genre: &str) -> Color32 {
     match genre.to_ascii_lowercase().as_str() {
         "game pass" => theme::GREEN,
+        "epic games" => theme::EPIC_BLUE,
         "action" => Color32::from_rgb(249, 115, 22),
         "adventure" => theme::ACCENT_LIGHT,
         "rpg" => Color32::from_rgb(245, 158, 11),

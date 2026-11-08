@@ -5,11 +5,14 @@ use std::path::PathBuf;
 const KEY_LIBRARY: &str = "library_path";
 const KEY_THEME: &str = "theme";
 const KEY_LANGUAGE: &str = "language";
+const KEY_AUTO_SHORTCUT: &str = "auto_shortcut";
 
 pub struct Settings {
     pub library_dir: String,
     pub light_theme: bool,
     pub french: bool,
+    /// Crée un raccourci bureau à la fin de chaque installation.
+    pub auto_shortcut: bool,
     pub status: String,
 }
 
@@ -21,6 +24,7 @@ impl Settings {
             library_dir: value(KEY_LIBRARY).unwrap_or_else(|| default_folder("Xbox Games")),
             light_theme: value(KEY_THEME).as_deref() == Some("light"),
             french: value(KEY_LANGUAGE).as_deref() == Some("fr"),
+            auto_shortcut: value(KEY_AUTO_SHORTCUT).as_deref() != Some("off"),
             status: String::new(),
         }
     }
@@ -31,6 +35,7 @@ impl Settings {
             (KEY_LIBRARY, self.library_dir.as_str()),
             (KEY_THEME, if self.light_theme { "light" } else { "dark" }),
             (KEY_LANGUAGE, if self.french { "fr" } else { "en" }),
+            (KEY_AUTO_SHORTCUT, if self.auto_shortcut { "on" } else { "off" }),
         ]);
     }
 
@@ -40,11 +45,11 @@ impl Settings {
     }
 
     pub fn reset(&mut self) {
-        self.library_dir = default_folder("Xbox Games");
         self.light_theme = false;
         self.french = false;
+        self.auto_shortcut = true;
         self.persist();
-        self.status = "Default folder restored.".into();
+        self.status = "Default settings restored.".into();
     }
 }
 

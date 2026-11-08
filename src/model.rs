@@ -39,6 +39,12 @@ pub struct Game {
     pub critic_recommend: Option<u8>,
     pub epic_stats_requested: bool,
     pub epic_stats_loaded: bool,
+    /// Infos officielles Epic déjà demandées (une seule requête par jeu).
+    pub store_info_requested: bool,
+    /// Page du jeu sur la boutique Epic Games.
+    pub store_url: String,
+    /// Résultat de la requête boutique Epic (affiché dans la fiche pour diagnostic).
+    pub store_info_status: String,
     pub platform: String,
     pub genres: Vec<String>,
     pub categories: Vec<String>,

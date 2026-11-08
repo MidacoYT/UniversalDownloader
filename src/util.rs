@@ -93,6 +93,14 @@ pub fn normalize_title(value: &str) -> String {
         .collect()
 }
 
+/// Epic utilise des dates lointaines (ex. 2099-01-20) pour « date inconnue / non annoncée ».
+pub fn is_known_release(value: &str) -> bool {
+    value
+        .get(..4)
+        .and_then(|year| year.parse::<u32>().ok())
+        .is_some_and(|year| (1970..2090).contains(&year))
+}
+
 pub fn default_folder(name: &str) -> String {
     std::env::var("USERPROFILE")
         .map(|profile| format!("{profile}\\{name}"))
@@ -115,6 +123,13 @@ mod tests {
     fn dates_are_formatted() {
         assert_eq!(format_date("2024-03-07T10:00:00Z"), "Mar, 7, 2024");
         assert_eq!(format_date("garbage"), "garbage");
+    }
+
+    #[test]
+    fn placeholder_release_dates_are_unknown() {
+        assert!(is_known_release("2024-03-07T10:00:00Z"));
+        assert!(!is_known_release("2099-01-20T00:00:00Z"));
+        assert!(!is_known_release(""));
     }
 
     #[test]

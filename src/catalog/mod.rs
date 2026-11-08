@@ -1,5 +1,6 @@
 //! État du catalogue : chargement asynchrone, filtres, tri, pagination.
 pub mod api;
+pub mod epic_store;
 
 use crate::library::Library;
 pub use crate::model::{ALL_GENRES, ALL_PLATFORMS};
