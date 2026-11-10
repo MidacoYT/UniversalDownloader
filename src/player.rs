@@ -1,11 +1,11 @@
 //! Lecteur de trailers intégré : une WebView2 enfant (wry) qui lit les manifests DASH (.mpd)
 //! via dash.js. Le décodage, l'audio et les contrôles sont gérés par le moteur Chromium.
 use std::path::PathBuf;
+#[cfg(windows)]
+use wry::WebViewBuilderExtWindows;
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::raw_window_handle::HasWindowHandle;
 use wry::{WebContext, WebView, WebViewBuilder};
-#[cfg(windows)]
-use wry::WebViewBuilderExtWindows;
 
 const DASH_JS: &str = "https://cdn.jsdelivr.net/npm/dashjs@4.7.4/dist/dash.all.min.js";
 
@@ -57,11 +57,8 @@ impl TrailerPlayer {
     /// Crée la WebView au besoin, puis la cale sur `rect` (points egui).
     pub fn sync<W: HasWindowHandle>(&mut self, window: &W, zoom: f32, rect: eframe::egui::Rect) {
         let bounds = wry::Rect {
-            position: LogicalPosition::new(
-                (rect.min.x * zoom) as f64,
-                (rect.min.y * zoom) as f64,
-            )
-            .into(),
+            position: LogicalPosition::new((rect.min.x * zoom) as f64, (rect.min.y * zoom) as f64)
+                .into(),
             size: LogicalSize::new((rect.width() * zoom) as f64, (rect.height() * zoom) as f64)
                 .into(),
         };

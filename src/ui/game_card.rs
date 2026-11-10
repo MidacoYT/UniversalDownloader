@@ -28,18 +28,18 @@ pub fn show(
         .animate_bool_with_time(hover_id.with("zoom"), hovered, 0.5);
 
     let frame = egui::Frame::new()
-        .fill(theme::mix((16, 16, 30), (24, 20, 48), hover))
+        .fill(theme::mix((22, 26, 34), (30, 35, 46), hover))
         .stroke(egui::Stroke::new(
             1.0,
-            theme::mix((75, 45, 117), (168, 85, 247), hover),
+            theme::BORDER.lerp_to_gamma(theme::ACCENT, hover),
         ))
         .shadow(egui::epaint::Shadow {
-            offset: [0, 4],
-            blur: (24.0 * hover) as u8,
+            offset: [0, 6],
+            blur: (20.0 * hover) as u8,
             spread: 0,
-            color: theme::accent_alpha((65.0 * hover) as u8),
+            color: Color32::from_black_alpha((120.0 * hover) as u8),
         })
-        .corner_radius(egui::CornerRadius::same(16))
+        .corner_radius(egui::CornerRadius::same(6))
         .inner_margin(egui::Margin::same(0))
         .show(ui, |card| {
             card.set_min_width(card.available_width());
@@ -68,17 +68,17 @@ fn art(card: &mut egui::Ui, game: &Game, texture: Option<&egui::TextureHandle>, 
             card,
             texture,
             rect,
-            images::top_radius(15),
+            egui::CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 },
             1.0 + 0.08 * zoom,
         ),
         None => images::paint_placeholder(
             card,
             rect,
-            images::top_radius(15),
+            egui::CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 },
             if game.image.is_empty() {
-                "NO IMAGE"
+                "AUCUNE IMAGE"
             } else {
-                "LOADING COVER…"
+                "LOADING…"
             },
         ),
     }
@@ -106,7 +106,13 @@ fn art(card: &mut egui::Ui, game: &Game, texture: Option<&egui::TextureHandle>, 
         rect.left_bottom() + egui::vec2(8.0, -27.0),
         egui::vec2((text_width + 12.0).max(42.0), 20.0),
     );
-    card.painter().rect_filled(badge, 5, genre_color(tag));
+    card.painter().rect_filled(badge, 4, Color32::from_rgba_unmultiplied(8, 10, 14, 215));
+    card.painter().rect_stroke(
+        badge,
+        4,
+        egui::Stroke::new(1.0, genre_color(tag)),
+        egui::StrokeKind::Inside,
+    );
     card.painter().text(
         badge.center(),
         egui::Align2::CENTER_CENTER,
@@ -122,11 +128,11 @@ fn genre_color(genre: &str) -> Color32 {
         "epic games" => theme::EPIC_BLUE,
         "action" => Color32::from_rgb(249, 115, 22),
         "adventure" => theme::ACCENT_LIGHT,
-        "rpg" => Color32::from_rgb(245, 158, 11),
+        "rpg" => theme::GOLD,
         "racing" => theme::GREEN,
         "strategy" => theme::BLUE,
         "simulation" => theme::CYAN,
-        _ => theme::ACCENT,
+        _ => theme::TEXT_MUTED,
     }
 }
 
@@ -134,7 +140,7 @@ fn body(card: &mut egui::Ui, game: &Game, loading: bool, out: &mut Vec<Action>) 
     let subtitle = if !game.publisher.is_empty() {
         game.publisher.as_str()
     } else if loading {
-        "Loading game details…"
+        "Loading details…"
     } else {
         "Unknown publisher"
     };
@@ -146,7 +152,7 @@ fn body(card: &mut egui::Ui, game: &Game, loading: bool, out: &mut Vec<Action>) 
                 [ui.available_width(), 24.0],
                 egui::Label::new(
                     RichText::new(game.display_name())
-                        .size(16.0)
+                        .size(15.0)
                         .strong()
                         .color(theme::TEXT_TITLE),
                 )
@@ -161,16 +167,16 @@ fn body(card: &mut egui::Ui, game: &Game, loading: bool, out: &mut Vec<Action>) 
             meta_row(
                 ui,
                 vec![
-                    (icons::storage(13.0), or_default(&game.size, "- GB")),
+                    (icons::storage(13.0), or_default(&game.size, "— GB")),
                     (
                         icons::players(13.0),
-                        or_default(&game.players, "Player info n/a"),
+                        or_default(&game.players, "Joueurs : n/d"),
                     ),
                 ],
             );
             meta_row(
                 ui,
-                vec![(icons::shield(13.0), or_default(&game.rating, "PEGI n/a"))],
+                vec![(icons::shield(13.0), or_default(&game.rating, "PEGI : n/d"))],
             );
             ui.add_space(10.0);
             actions(ui, game, out);
@@ -209,7 +215,8 @@ fn actions(ui: &mut egui::Ui, game: &Game, out: &mut Vec<Action>) {
         |ui| {
             if game.store == crate::model::GameStore::Xbox {
                 let download = egui::Button::image_and_text(icons::download(15.0), "Download")
-                    .fill(theme::ACCENT);
+                    .fill(theme::ACCENT)
+                    .corner_radius(6.0);
                 if ui.add(download).clicked() {
                     out.push(Action::PrepareDownload {
                         id: game.id.clone(),
@@ -219,7 +226,8 @@ fn actions(ui: &mut egui::Ui, game: &Game, out: &mut Vec<Action>) {
                 }
             } else {
                 let download = egui::Button::image_and_text(icons::download(15.0), "Download")
-                    .fill(theme::ACCENT);
+                    .fill(theme::ACCENT)
+                    .corner_radius(6.0);
                 if ui
                     .add_enabled(!game.manifest_url.is_empty(), download)
                     .clicked()
@@ -231,7 +239,11 @@ fn actions(ui: &mut egui::Ui, game: &Game, out: &mut Vec<Action>) {
                     });
                 }
             }
-            if ui.add(egui::Button::image(icons::info(16.0))).clicked() {
+            if ui
+                .add(egui::Button::image(icons::info(16.0)).corner_radius(6.0))
+                .on_hover_text("Details")
+                .clicked()
+            {
                 out.push(Action::OpenGame {
                     id: game.id.clone(),
                     store: game.store,

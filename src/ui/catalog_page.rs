@@ -72,8 +72,8 @@ fn render(
         ui.winui(|ui| {
             widgets::page_header(
                 ui,
-                "DISCOVER",
-                "Game catalog",
+                "Discover",
+                "Catalog",
                 "Browse Xbox Game Pass and Epic Games.",
             );
             store_selector(ui, selected_store, out);
@@ -94,54 +94,78 @@ fn render(
 }
 
 fn store_selector(ui: &mut egui::Ui, selected: CatalogSelection, out: &mut Vec<Action>) {
-    ui.add_space(8.0);
-    ui.vertical_centered(|ui| {
-        ui.label(widgets::muted("Switch catalog", 10.0));
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            let available = ui.available_width();
-            let button_width = ((available - 24.0) / 3.0).clamp(132.0, 268.0);
-            ui.add_space((available - (button_width * 3.0 + 24.0)).max(0.0) / 2.0);
-            store_button(ui, CatalogSelection::Xbox, selected, button_width, out);
-            ui.add_space(12.0);
-            store_button(ui, CatalogSelection::Epic, selected, button_width, out);
-            ui.add_space(12.0);
-            store_button(ui, CatalogSelection::All, selected, button_width, out);
-        });
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        store_tab(ui, CatalogSelection::All, selected, out);
+        store_tab(ui, CatalogSelection::Xbox, selected, out);
+        store_tab(ui, CatalogSelection::Epic, selected, out);
     });
+    // Filet de séparation sous les onglets.
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 0, super::theme::BORDER);
+    ui.add_space(14.0);
 }
 
-fn store_button(
+/// Onglet de catalogue : texte, avec un trait bleu sous l'onglet actif.
+fn store_tab(
     ui: &mut egui::Ui,
     store: CatalogSelection,
     selected: CatalogSelection,
-    width: f32,
     out: &mut Vec<Action>,
 ) {
     let (title, logo) = match store {
-        CatalogSelection::Xbox => ("Xbox Game Pass", icons::xbox_game_pass(34.0)),
-        CatalogSelection::Epic => ("Epic Games", icons::epic_games(34.0)),
-        CatalogSelection::All => ("All Catalog", icons::catalog(34.0)),
+        CatalogSelection::All => ("Entire catalog", icons::catalog(18.0)),
+        CatalogSelection::Xbox => ("Xbox Game Pass", icons::xbox_game_pass(18.0)),
+        CatalogSelection::Epic => ("Epic Games", icons::epic_games(18.0)),
     };
     let is_selected = store == selected;
-    let fill = if is_selected {
-        super::theme::accent_alpha(55)
+    let font = egui::FontId::proportional(13.0);
+    let galley = ui.painter().layout_no_wrap(
+        title.to_owned(),
+        font.clone(),
+        super::theme::TEXT_TITLE,
+    );
+    let width = galley.size().x + 52.0;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 42.0), egui::Sense::click());
+    let hover = ui
+        .ctx()
+        .animate_bool_with_time(response.id.with("tab-hover"), response.hovered(), 0.12);
+    let active = ui
+        .ctx()
+        .animate_bool_with_time(response.id.with("tab-active"), is_selected, 0.2);
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let text_color = super::theme::mix((138, 146, 160), (245, 247, 250), hover.max(active));
+    let painter = ui.painter();
+    logo.tint(if is_selected {
+        Color32::WHITE
     } else {
-        super::theme::BG_CARD
-    };
-    let stroke = if is_selected {
-        super::theme::ACCENT_LIGHT
-    } else {
-        super::theme::accent_alpha(75)
-    };
-    let button = egui::Button::image_and_text(logo, title)
-        .fill(fill)
-        .stroke(egui::Stroke::new(
-            if is_selected { 1.5 } else { 1.0 },
-            stroke,
-        ))
-        .corner_radius(9);
-    if ui.add_sized(egui::vec2(width, 62.0), button).clicked() {
+        super::theme::TEXT_MUTED
+    })
+    .paint_at(
+        ui,
+        egui::Rect::from_min_size(
+            egui::pos2(rect.left() + 12.0, rect.center().y - 9.0),
+            egui::vec2(18.0, 18.0),
+        ),
+    );
+    painter.text(
+        egui::pos2(rect.left() + 38.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        title,
+        font,
+        text_color,
+    );
+    if active > 0.0 {
+        let bar = egui::Rect::from_min_max(
+            egui::pos2(rect.left() + 8.0, rect.bottom() - 2.0),
+            egui::pos2(rect.right() - 8.0, rect.bottom()),
+        );
+        painter.rect_filled(bar, 1, super::theme::ACCENT.gamma_multiply(active));
+    }
+    if response.clicked() {
         out.push(Action::SelectCatalog(store));
     }
 }
@@ -154,7 +178,7 @@ fn toolbar(
 ) {
     ui.horizontal(|ui| {
         ui.add(
-            FluentTextEdit::new(&mut catalog.search).hint_text("Search title, studio, or genre"),
+            FluentTextEdit::new(&mut catalog.search).hint_text("Search a title, publisher or genre"),
         );
         widgets::combo(
             ui,
@@ -210,8 +234,14 @@ fn pagination(ui: &mut egui::Ui, catalog: &mut Catalog, total_pages: usize) {
         ui.label(RichText::new(format!("{} result(s)", catalog.visible.len())).size(11.0));
         ui.add_space(12.0);
         let can_previous = catalog.page_index > 0;
-        if widgets::pill_button(ui, "Previous", Some(icons::chevron_left(14.0)), None, can_previous)
-            .clicked()
+        if widgets::pill_button(
+            ui,
+            "Previous",
+            Some(icons::chevron_left(14.0)),
+            None,
+            can_previous,
+        )
+        .clicked()
         {
             catalog.page_index -= 1;
             catalog.scroll_top = true;
@@ -279,9 +309,9 @@ fn empty_state(
         } else if catalog.games.is_empty() {
             "The catalog is empty. Click “Refresh”."
         } else {
-            "No games match your search."
+            "No game matches your search."
         };
-        ui.label(RichText::new(text).color(Color32::GRAY));
+        ui.label(RichText::new(text).color(super::theme::TEXT_MUTED));
         if !catalog.games.is_empty() && ui.button("Reset filters").clicked() {
             out.push(match selected {
                 CatalogSelection::All => Action::ResetAllCatalogFilters,

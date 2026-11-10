@@ -1,26 +1,42 @@
-//! Palette et constantes visuelles.
+//! Design system « Connect » : palette sombre charbon, accent bleu, bordures fines.
+//! Les noms des constantes sont conservés : toute l'interface reste compatible.
 use eframe::egui::Color32;
 
-pub const ACCENT: Color32 = Color32::from_rgb(124, 58, 237);
-pub const ACCENT_LIGHT: Color32 = Color32::from_rgb(168, 85, 247);
-pub const BG_APP: Color32 = Color32::from_rgb(8, 8, 15);
-pub const BG_SIDEBAR: Color32 = Color32::from_rgb(9, 9, 21);
-pub const BG_CARD: Color32 = Color32::from_rgb(25, 25, 40);
-pub const BG_MODAL: Color32 = Color32::from_rgb(16, 16, 30);
-pub const TEXT_TITLE: Color32 = Color32::from_rgb(240, 237, 249);
-pub const TEXT_MUTED: Color32 = Color32::from_rgb(148, 148, 168);
-pub const TEXT_SUBTLE: Color32 = Color32::from_rgb(155, 151, 172);
-pub const GREEN: Color32 = Color32::from_rgb(34, 197, 94);
-pub const EMERALD: Color32 = Color32::from_rgb(16, 185, 129);
-pub const BLUE: Color32 = Color32::from_rgb(59, 130, 246);
-pub const EPIC_BLUE: Color32 = Color32::from_rgb(0, 120, 242);
-pub const GOLD: Color32 = Color32::from_rgb(251, 191, 36);
-pub const CYAN: Color32 = Color32::from_rgb(6, 182, 212);
-pub const DANGER: Color32 = Color32::from_rgb(153, 27, 27);
-pub const DANGER_DARK: Color32 = Color32::from_rgb(127, 29, 29);
+// ── Accent ─────────────────────────────────────────────
+/// Bleu signature (CTA, sélection, progression).
+pub const ACCENT: Color32 = Color32::from_rgb(0, 114, 255);
+pub const ACCENT_LIGHT: Color32 = Color32::from_rgb(74, 160, 255);
+/// Bleu foncé pour l'état pressé / actif.
+pub const ACCENT_DEEP: Color32 = Color32::from_rgb(0, 88, 204);
 
+// ── Surfaces ───────────────────────────────────────────
+pub const BG_APP: Color32 = Color32::from_rgb(10, 12, 16);
+pub const BG_SIDEBAR: Color32 = Color32::from_rgb(14, 17, 23);
+pub const BG_CARD: Color32 = Color32::from_rgb(22, 26, 34);
+pub const BG_CARD_HOVER: Color32 = Color32::from_rgb(30, 35, 46);
+pub const BG_MODAL: Color32 = Color32::from_rgb(18, 21, 28);
+pub const BORDER: Color32 = Color32::from_rgb(40, 46, 58);
+pub const BORDER_STRONG: Color32 = Color32::from_rgb(58, 66, 82);
+
+// ── Texte ──────────────────────────────────────────────
+pub const TEXT_TITLE: Color32 = Color32::from_rgb(245, 247, 250);
+pub const TEXT_MUTED: Color32 = Color32::from_rgb(138, 146, 160);
+pub const TEXT_SUBTLE: Color32 = Color32::from_rgb(110, 118, 132);
+
+// ── Statuts ────────────────────────────────────────────
+pub const GREEN: Color32 = Color32::from_rgb(46, 204, 113);
+pub const EMERALD: Color32 = Color32::from_rgb(38, 180, 120);
+pub const BLUE: Color32 = Color32::from_rgb(59, 130, 246);
+/// Couleur de marque Epic (utilisée seulement pour le badge Epic, jamais en vert).
+pub const EPIC_BLUE: Color32 = Color32::from_rgb(0, 120, 242);
+pub const GOLD: Color32 = Color32::from_rgb(245, 185, 66);
+pub const CYAN: Color32 = Color32::from_rgb(56, 189, 248);
+pub const DANGER: Color32 = Color32::from_rgb(200, 52, 52);
+pub const DANGER_DARK: Color32 = Color32::from_rgb(150, 36, 36);
+
+/// Accent avec transparence (bordures de survol, halos).
 pub fn accent_alpha(alpha: u8) -> Color32 {
-    Color32::from_rgba_unmultiplied(124, 58, 237, alpha)
+    Color32::from_rgba_unmultiplied(0, 114, 255, alpha)
 }
 
 /// Interpolation linéaire entre deux couleurs RGB (`t` entre 0 et 1).

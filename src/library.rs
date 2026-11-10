@@ -363,13 +363,20 @@ fn run_uninstall(
         None,
     ));
     unregister_packages_in_folder(&target)?;
-    let _ = tx.send(UninstallEvent::Stage("Deleting game files…".into(), Some(0.0)));
+    let _ = tx.send(UninstallEvent::Stage(
+        "Deleting game files…".into(),
+        Some(0.0),
+    ));
     remove_dir_with_progress(&target, |fraction| {
         let _ = tx.send(UninstallEvent::Progress(fraction));
     })
 }
 
-fn collect_tree(dir: &Path, files: &mut Vec<PathBuf>, dirs: &mut Vec<PathBuf>) -> std::io::Result<()> {
+fn collect_tree(
+    dir: &Path,
+    files: &mut Vec<PathBuf>,
+    dirs: &mut Vec<PathBuf>,
+) -> std::io::Result<()> {
     for item in std::fs::read_dir(dir)? {
         let item = item?;
         let path = item.path();
@@ -521,21 +528,105 @@ pub fn launch_game(folder: &Path, preferred_exe: Option<&str>) -> Result<(), Str
 
 fn find_game_executable(folder: &Path, preferred_exe: Option<&str>) -> Result<PathBuf, String> {
     let preferred = preferred_exe.map(|exe| folder.join(exe.replace('/', "\\")));
-    if let Some(path) = preferred.filter(|path| path.is_file()) {
+    if let Some(path) = preferred.filter(|path| {
+        path.is_file()
+            && path
+                .file_name()
+                .is_some_and(|name| !is_launcher_stub(&name.to_string_lossy()))
+    }) {
         return Ok(path);
     }
-    std::fs::read_dir(folder)
-        .map_err(|e| format!("Could not read game folder: {e}"))?
-        .flatten()
-        .map(|entry| entry.path())
-        .find(|path| {
-            path.extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
-                && !path
-                    .file_name()
-                    .is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().contains("wdapp"))
-        })
+    // Le manifest Epic d'un jeu Ubisoft pointe vers `UplayLaunch.exe`, un simple relais vers
+    // Ubisoft Connect : ce n'est pas le jeu. Quand l'extraction directe a déposé les vrais
+    // fichiers (par exemple `bin\WatchDogs2.exe`), on lance ces derniers à la place.
+    find_best_executable(folder)
         .ok_or_else(|| "No game executable was found in this folder.".to_owned())
+}
+
+/// Exécutables qui ne font que démarrer un launcher ou installer un autre produit : ils ne
+/// sont jamais le jeu quand un véritable exécutable existe à côté.
+fn is_launcher_stub(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "uplaylaunch.exe"
+            | "uplay.exe"
+            | "upc.exe"
+            | "ubisoftconnect.exe"
+            | "ubisoftconnectinstaller.exe"
+            | "autorun.exe"
+            | "dxsetup.exe"
+    ) || name.starts_with("vcredist")
+        || name.starts_with("easyanticheat")
+        || name.starts_with("unins")
+        || name.contains("wdapp")
+}
+
+/// Cherche le meilleur exécutable du dossier et de ses sous-dossiers. Un exécutable placé
+/// dans `bin` (convention des jeux Ubisoft) ou à la racine est préféré ; à défaut, le plus
+/// gros fichier l'emporte. Les dossiers d'installation et d'anti-triche sont ignorés.
+fn find_best_executable(folder: &Path) -> Option<PathBuf> {
+    let mut best: Option<(u64, PathBuf)> = None;
+    let mut stack = vec![(folder.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        if depth > 3 {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                if matches!(
+                    name.as_str(),
+                    "installer"
+                        | "easyanticheat"
+                        | "support"
+                        | "_commonredist"
+                        | "redist"
+                        | "redistributables"
+                ) {
+                    continue;
+                }
+                stack.push((path, depth + 1));
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+                || is_launcher_stub(name)
+            {
+                continue;
+            }
+            let mut score = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+            let parent = path
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            if parent.eq_ignore_ascii_case("bin") {
+                score += 1 << 40;
+            } else if depth == 0 {
+                score += 1 << 39;
+            }
+            if best
+                .as_ref()
+                .is_none_or(|(best_score, _)| score > *best_score)
+            {
+                best = Some((score, path));
+            }
+        }
+    }
+    best.map(|(_, path)| path)
 }
 
 /// Crée le raccourci bureau d'un jeu.
@@ -613,8 +704,7 @@ $shortcutPath
                     folder.display()
                 ));
             }
-            command
-                .env("UD_SHORTCUT_EXECUTABLE", preferred_exe.unwrap_or_default());
+            command.env("UD_SHORTCUT_EXECUTABLE", preferred_exe.unwrap_or_default());
             format!(
                 r#"
 $ErrorActionPreference = 'Stop'

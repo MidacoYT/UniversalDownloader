@@ -1,7 +1,7 @@
 //! Page « Settings » : dossier de la bibliothèque.
 use super::{icons, theme, widgets};
 use crate::settings::Settings;
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, RichText};
 use fluent_egui::winui::prelude::*;
 
 const CONTENT_WIDTH: f32 = 760.0;
@@ -9,9 +9,9 @@ const CONTENT_WIDTH: f32 = 760.0;
 pub fn show(ui: &mut egui::Ui, settings: &mut Settings) {
     widgets::page_header(
         ui,
-        "PREFERENCES",
+        "Preferences",
         "Settings",
-        "Manage your app preferences.",
+        "Manage the application preferences.",
     );
     egui::ScrollArea::vertical()
         .id_salt("settings_scroll")
@@ -24,12 +24,24 @@ pub fn show(ui: &mut egui::Ui, settings: &mut Settings) {
                 section(
                     ui,
                     icons::play(18.0),
-                    "Desktop shortcuts",
-                    "Like the Xbox and Epic Games apps, add a shortcut to your desktop when a game finishes installing.",
+                    "Raccourcis bureau",
+                    "Like the Xbox and Epic Games apps, adds a desktop shortcut once installation is complete.",
                     |ui| {
                         ui.checkbox(
                             &mut settings.auto_shortcut,
-                            "Create a desktop shortcut after each install",
+                            "Create a desktop shortcut after each installation",
+                        );
+                    },
+                );
+                section(
+                    ui,
+                    icons::play(18.0),
+                    "Ubisoft games (Epic Games)",
+                    "Game files are always extracted directly from the Ubisoft installer packages. This option also runs the Ubisoft Connect client installer bundled with the game.",
+                    |ui| {
+                        ui.checkbox(
+                            &mut settings.ubisoft_connect,
+                            "Also install the Ubisoft Connect client",
                         );
                     },
                 );
@@ -55,15 +67,15 @@ fn section(
 ) {
     egui::Frame::new()
         .fill(theme::BG_CARD)
-        .stroke(egui::Stroke::new(1.0, theme::accent_alpha(45)))
-        .corner_radius(12)
+        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+        .corner_radius(6)
         .inner_margin(egui::Margin::same(18))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 let (tile, _) =
                     ui.allocate_exact_size(egui::vec2(38.0, 38.0), egui::Sense::hover());
-                ui.painter().rect_filled(tile, 10, theme::accent_alpha(32));
+                ui.painter().rect_filled(tile, 6, theme::accent_alpha(36));
                 image.paint_at(
                     ui,
                     egui::Rect::from_center_size(tile.center(), egui::vec2(18.0, 18.0)),
@@ -82,10 +94,10 @@ fn section(
 
 fn actions(ui: &mut egui::Ui, settings: &mut Settings) {
     ui.horizontal(|ui| {
-        if ui.add(FluentButton::accent("Save settings")).clicked() {
+        if ui.add(FluentButton::accent("Save")).clicked() {
             settings.save();
         }
-        if ui.button("Reset to defaults").clicked() {
+        if ui.button("Restore defaults").clicked() {
             settings.reset();
         }
         if !settings.status.is_empty() {
@@ -94,7 +106,7 @@ fn actions(ui: &mut egui::Ui, settings: &mut Settings) {
             ui.label(
                 RichText::new(&settings.status)
                     .size(11.5)
-                    .color(Color32::from_rgb(110, 231, 183)),
+                    .color(theme::GREEN),
             );
         }
     });

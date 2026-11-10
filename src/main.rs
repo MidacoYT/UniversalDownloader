@@ -21,6 +21,7 @@ mod net;
 mod player;
 mod settings;
 mod ui;
+mod upc;
 mod updates;
 mod util;
 
@@ -56,6 +57,7 @@ fn main() -> eframe::Result<()> {
             .with_icon(app_icon())
             .with_inner_size([1280.0, 720.0])
             .with_min_inner_size([760.0, 520.0])
+            .with_decorations(false)
             .with_transparent(true),
         ..Default::default()
     };

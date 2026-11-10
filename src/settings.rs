@@ -6,6 +6,7 @@ const KEY_LIBRARY: &str = "library_path";
 const KEY_THEME: &str = "theme";
 const KEY_LANGUAGE: &str = "language";
 const KEY_AUTO_SHORTCUT: &str = "auto_shortcut";
+const KEY_UBISOFT_CONNECT: &str = "ubisoft_connect";
 
 pub struct Settings {
     pub library_dir: String,
@@ -13,6 +14,10 @@ pub struct Settings {
     pub french: bool,
     /// Crée un raccourci bureau à la fin de chaque installation.
     pub auto_shortcut: bool,
+    /// Jeux Ubisoft d'Epic : exécute l'installeur du client Ubisoft Connect fourni par Epic
+    /// (`Uplay/UplayInstaller.exe`). Le jeu lui-même est toujours installé en extrayant les
+    /// volumes `.upc` : ce prérequis ne contient aucun fichier de jeu.
+    pub ubisoft_connect: bool,
     pub status: String,
 }
 
@@ -25,6 +30,7 @@ impl Settings {
             light_theme: value(KEY_THEME).as_deref() == Some("light"),
             french: value(KEY_LANGUAGE).as_deref() == Some("fr"),
             auto_shortcut: value(KEY_AUTO_SHORTCUT).as_deref() != Some("off"),
+            ubisoft_connect: value(KEY_UBISOFT_CONNECT).as_deref() != Some("off"),
             status: String::new(),
         }
     }
@@ -35,7 +41,14 @@ impl Settings {
             (KEY_LIBRARY, self.library_dir.as_str()),
             (KEY_THEME, if self.light_theme { "light" } else { "dark" }),
             (KEY_LANGUAGE, if self.french { "fr" } else { "en" }),
-            (KEY_AUTO_SHORTCUT, if self.auto_shortcut { "on" } else { "off" }),
+            (
+                KEY_AUTO_SHORTCUT,
+                if self.auto_shortcut { "on" } else { "off" },
+            ),
+            (
+                KEY_UBISOFT_CONNECT,
+                if self.ubisoft_connect { "on" } else { "off" },
+            ),
         ]);
     }
 
@@ -48,6 +61,7 @@ impl Settings {
         self.light_theme = false;
         self.french = false;
         self.auto_shortcut = true;
+        self.ubisoft_connect = true;
         self.persist();
         self.status = "Default settings restored.".into();
     }
@@ -84,4 +98,12 @@ fn write_settings(values: &[(&str, &str)]) {
     if let Ok(data) = serde_json::to_vec_pretty(&serde_json::Value::Object(json)) {
         let _ = std::fs::write(file, data);
     }
+}
+
+/// Lu au moment du téléchargement (le réglage est modifiable pendant que l'appli tourne).
+pub fn ubisoft_connect_enabled() -> bool {
+    read_settings()
+        .get(KEY_UBISOFT_CONNECT)
+        .and_then(|value| value.as_str())
+        != Some("off")
 }

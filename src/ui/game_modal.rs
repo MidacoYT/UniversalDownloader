@@ -1,13 +1,16 @@
-//! Fenêtre modale de détails d'un jeu (hero, stats, médias, fonctionnalités).
-use super::{Action, icons, theme, widgets};
+//! Fiche jeu « Connect » : bannière plein format, actions en évidence, puis deux colonnes
+//! (contenu à gauche, informations à droite).
+use super::{Action, theme, topbar, widgets};
 use crate::images::{self, ImageCache};
 use crate::model::{FeatureGroup, Game, GameAttribute, GameStore};
 use crate::util::{format_count, open_store_page};
+use eframe::egui::epaint::{Mesh, Vertex, WHITE_UV};
 use eframe::egui::{self, Color32, RichText, TextureHandle};
-use fluent_egui::winui::prelude::*;
 
 const MEDIA_MAX: (u32, u32) = (960, 540);
-const HERO_HEIGHT: f32 = 205.0;
+const HERO_HEIGHT: f32 = 230.0;
+const SIDE_WIDTH: f32 = 340.0;
+const GUTTER: f32 = 32.0;
 
 /// Position des carrousels (réinitialisée à l'ouverture d'un jeu).
 #[derive(Default)]
@@ -68,19 +71,26 @@ pub fn show(
         .min(game.screenshots.len().saturating_sub(1));
     state.trailer = state.trailer.min(game.trailers.len().saturating_sub(1));
 
+    // Zone réellement visible : sous la barre de titre personnalisée, jusqu'aux bords.
     let viewport = ctx.input(|i| i.viewport_rect());
-    let width = (viewport.width() - 32.0).clamp(320.0, 1120.0);
-    let height = (viewport.height() - 32.0).clamp(320.0, 850.0);
-    let rect = egui::Rect::from_center_size(viewport.center(), egui::vec2(width, height));
+    let content = egui::Rect::from_min_max(
+        egui::pos2(viewport.left(), viewport.top() + topbar::HEIGHT),
+        viewport.max,
+    );
+    // La modale utilise presque tout le viewport. Seule la largeur est plafonnée
+    // sur les écrans géants ; la hauteur suit toujours la fenêtre.
+    const MARGIN: f32 = 16.0;
+    let width = (content.width() - MARGIN * 2.0).max(280.0).min(1600.0);
+    let height = (content.height() - MARGIN * 2.0).max(260.0);
+    let rect = egui::Rect::from_center_size(content.center(), egui::vec2(width, height));
 
     ctx.layer_painter(egui::LayerId::new(
         egui::Order::Middle,
         egui::Id::new("game_modal_backdrop"),
     ))
-    .rect_filled(viewport, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 195));
+    .rect_filled(content, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 170));
 
     let media = Media::load(ctx, game, state, images);
-    // Fermeture clavier / clic extérieur désactivée tant que le lecteur de trailer est ouvert.
     let mut close = interactive
         && ctx.input(|i| {
             i.key_pressed(egui::Key::Escape)
@@ -88,40 +98,52 @@ pub fn show(
                     && i.pointer.interact_pos().is_some_and(|p| !rect.contains(p)))
         });
 
+    // Zone de la modale : layout borné au rectangle + clip, pour que rien ne sorte du cadre.
     egui::Area::new(egui::Id::new("game_details_modal"))
         .order(egui::Order::Foreground)
         .fixed_pos(rect.min)
+        .default_size(rect.size())
         .show(ctx, |ui| {
+            // Important : Area est normalement dimensionnée par son contenu.
+            // On lui impose ici la taille du viewport pour éviter l'effet carré
+            // et empêcher le contenu de réduire la modale.
             ui.set_min_size(rect.size());
             ui.set_max_size(rect.size());
-            egui::Frame::new()
-                .fill(theme::BG_MODAL)
-                .stroke(egui::Stroke::new(
-                    1.0,
-                    Color32::from_rgba_unmultiplied(168, 85, 247, 100),
-                ))
-                .shadow(egui::epaint::Shadow {
-                    offset: [0, 12],
-                    blur: 42,
-                    spread: 0,
-                    color: Color32::from_rgba_unmultiplied(0, 0, 0, 180),
-                })
-                .corner_radius(egui::CornerRadius::same(16))
-                .inner_margin(egui::Margin::same(0))
-                .show(ui, |ui| {
-                    ui.set_min_width(rect.width());
-                    ui.set_max_width(rect.width());
-                    if hero(ui, game, media.hero.as_ref()) {
-                        close = true;
-                    }
-                    egui::ScrollArea::vertical()
-                        .max_height(ui.available_height() - 4.0)
-                        .show(ui, |ui| {
-                            egui::Frame::new()
-                                .inner_margin(egui::Margin::same(20))
-                                .show(ui, |ui| body(ui, game, state, &media, out));
-                        });
-                });
+            ui.set_width(rect.width());
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                ui.set_min_size(rect.size());
+                ui.set_max_size(rect.size());
+                ui.set_clip_rect(rect);
+                egui::Frame::new()
+                    .fill(theme::BG_MODAL)
+                    .stroke(egui::Stroke::new(1.0, theme::BORDER_STRONG))
+                    .shadow(egui::epaint::Shadow {
+                        offset: [0, 12],
+                        blur: 42,
+                        spread: 0,
+                        color: Color32::from_rgba_unmultiplied(0, 0, 0, 180),
+                    })
+                    .corner_radius(egui::CornerRadius::same(8))
+                    .inner_margin(egui::Margin::same(0))
+                    .show(ui, |ui| {
+                        if hero(ui, game, media.hero.as_ref(), out) {
+                            close = true;
+                        }
+                        egui::ScrollArea::vertical()
+                            .id_salt(format!("game_modal_scroll:{}", game.id))
+                            .max_height(ui.available_height().max(0.0))
+                            .max_width(ui.available_width())
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                egui::Frame::new()
+                                    .inner_margin(egui::Margin::symmetric(
+                                        if ui.available_width() < 760.0 { 16 } else { 28 },
+                                        24,
+                                    ))
+                                    .show(ui, |ui| body(ui, game, state, &media, out));
+                            });
+                    });
+            });
         });
 
     if close {
@@ -129,88 +151,141 @@ pub fn show(
     }
 }
 
-// ───────────────────────── Hero ─────────────────────────
+// ───────────────────────── Bannière ─────────────────────────
 
-/// Bandeau supérieur ; retourne `true` si le bouton de fermeture est cliqué.
-fn hero(ui: &mut egui::Ui, game: &Game, texture: Option<&TextureHandle>) -> bool {
+/// Bannière plein format avec titre, actions principales et bouton de fermeture.
+/// Retourne `true` si le bouton de fermeture est cliqué.
+fn hero(
+    ui: &mut egui::Ui,
+    game: &Game,
+    texture: Option<&TextureHandle>,
+    out: &mut Vec<Action>,
+) -> bool {
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), HERO_HEIGHT),
         egui::Sense::hover(),
     );
-    let radius = images::top_radius(15);
-    match texture {
-        Some(texture) => images::paint_cover(ui, texture, rect, radius, 1.0),
-        None => {
-            ui.painter()
-                .rect_filled(rect, radius, Color32::from_rgb(31, 25, 48));
+    let radius = egui::CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 };
+    let painter = ui.painter().clone();
+    painter.rect_filled(rect, radius, theme::BG_CARD);
+    if let Some(texture) = texture {
+        images::paint_cover(ui, texture, rect, radius, 1.0);
+    }
+
+    // Voiles : fondu vers le bas pour le texte, et ombrage à gauche.
+    let app = theme::BG_APP;
+    let clear = Color32::from_rgba_unmultiplied(app.r(), app.g(), app.b(), 0);
+    let solid = Color32::from_rgba_unmultiplied(app.r(), app.g(), app.b(), 255);
+    let shade = Color32::from_rgba_unmultiplied(app.r(), app.g(), app.b(), 190);
+    let bottom = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.top() + rect.height() * 0.25), rect.max);
+    gradient(&painter, bottom, [clear, clear, solid, solid]);
+    gradient(&painter, rect, [shade, clear, clear, shade]);
+
+    let left = rect.left() + 44.0;
+    let (store_label, store_color) = match game.store {
+        GameStore::Xbox => ("XBOX GAME PASS", theme::GREEN),
+        GameStore::Epic => ("EPIC GAMES", theme::EPIC_BLUE),
+    };
+    painter.text(
+        egui::pos2(left, rect.bottom() - 118.0),
+        egui::Align2::LEFT_TOP,
+        store_label,
+        egui::FontId::proportional(11.0),
+        store_color,
+    );
+    painter.text(
+        egui::pos2(left, rect.bottom() - 98.0),
+        egui::Align2::LEFT_TOP,
+        game.display_name(),
+        egui::FontId::proportional(30.0),
+        theme::TEXT_TITLE,
+    );
+    let developer = or_fallback(&game.developer, "Unknown developer");
+    let publisher = or_fallback(&game.publisher, "Unknown publisher");
+    painter.text(
+        egui::pos2(left, rect.bottom() - 58.0),
+        egui::Align2::LEFT_TOP,
+        format!("{developer}  ·  {publisher}"),
+        egui::FontId::proportional(13.0),
+        theme::TEXT_MUTED,
+    );
+
+    // Actions principales : téléchargement en bleu, lien secondaire à côté.
+    let button_y = rect.bottom() - 38.0;
+    let download = egui::Button::new(RichText::new("Download").strong().color(Color32::WHITE))
+        .fill(theme::ACCENT)
+        .corner_radius(6.0)
+        .min_size(egui::vec2(170.0, 36.0));
+    if ui
+        .put(
+            egui::Rect::from_min_size(egui::pos2(left, button_y), egui::vec2(170.0, 36.0)),
+            download,
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+    {
+        out.push(Action::PrepareDownload {
+            id: game.id.clone(),
+            name: game.display_name().to_owned(),
+            store: game.store,
+        });
+    }
+    match game.store {
+        GameStore::Xbox => {
+            let secondary = egui::Button::new(RichText::new("Open in Xbox").color(theme::TEXT_TITLE))
+                .fill(Color32::from_rgba_unmultiplied(0, 0, 0, 0))
+                .stroke(egui::Stroke::new(1.0, theme::BORDER_STRONG))
+                .corner_radius(6.0)
+                .min_size(egui::vec2(170.0, 36.0));
+            if ui
+                .put(
+                    egui::Rect::from_min_size(egui::pos2(left + 182.0, button_y), egui::vec2(170.0, 36.0)),
+                    secondary,
+                )
+                .clicked()
+            {
+                open_store_page(&game.id);
+            }
+        }
+        GameStore::Epic => {
+            // Page officielle Epic en priorité ; l'ancien lien tiers ne sert que de secours.
+            let info_url = if game.store_url.is_empty() {
+                game.egdata_url.as_str()
+            } else {
+                game.store_url.as_str()
+            };
+            if !info_url.is_empty() {
+                let secondary = egui::Button::new(RichText::new("More info").color(theme::TEXT_TITLE))
+                    .fill(Color32::from_rgba_unmultiplied(0, 0, 0, 0))
+                    .stroke(egui::Stroke::new(1.0, theme::BORDER_STRONG))
+                    .corner_radius(6.0)
+                    .min_size(egui::vec2(170.0, 36.0));
+                if ui
+                    .put(
+                        egui::Rect::from_min_size(egui::pos2(left + 182.0, button_y), egui::vec2(170.0, 36.0)),
+                        secondary,
+                    )
+                    .clicked()
+                {
+                    let _ = webbrowser::open(info_url);
+                }
+            }
         }
     }
-    let painter = ui.painter();
-    painter.rect_filled(rect, radius, Color32::from_rgba_unmultiplied(8, 8, 15, 48));
-    painter.rect_filled(
-        egui::Rect::from_min_max(
-            egui::pos2(rect.left(), rect.center().y - 12.0),
-            rect.right_bottom(),
-        ),
-        0.0,
-        Color32::from_rgba_unmultiplied(8, 8, 15, 190),
-    );
 
-    let badge = egui::Rect::from_min_size(
-        rect.left_bottom() + egui::vec2(20.0, -82.0),
-        egui::vec2(112.0, 22.0),
-    );
-    let badge_color = match game.store {
-        GameStore::Xbox => theme::GREEN,
-        GameStore::Epic => theme::EPIC_BLUE,
-    };
-    painter.rect_filled(badge, 6.0, badge_color);
-    painter.text(
-        badge.center(),
-        egui::Align2::CENTER_CENTER,
-        match game.store {
-            GameStore::Xbox if game.ea_play => "EA PLAY",
-            GameStore::Xbox => "GAME PASS",
-            GameStore::Epic => "EPIC GAMES",
-        },
-        egui::FontId::proportional(10.0),
-        Color32::WHITE,
-    );
-    painter.text(
-        rect.left_bottom() + egui::vec2(20.0, -28.0),
-        egui::Align2::LEFT_BOTTOM,
-        game.display_name(),
-        egui::FontId::proportional(25.0),
-        Color32::from_rgb(245, 243, 255),
-    );
-    painter.text(
-        rect.left_bottom() + egui::vec2(20.0, -9.0),
-        egui::Align2::LEFT_BOTTOM,
-        format!(
-            "{}  •  {}",
-            or_fallback(&game.developer, "Unknown developer"),
-            or_fallback(&game.publisher, "Unknown publisher")
-        ),
-        egui::FontId::proportional(12.0),
-        Color32::from_rgb(190, 186, 207),
-    );
-
+    // Bouton de fermeture, en haut à droite.
     let close_rect = egui::Rect::from_min_size(
-        rect.right_top() + egui::vec2(-44.0, 12.0),
-        egui::vec2(32.0, 32.0),
+        rect.right_top() + egui::vec2(-48.0, 14.0),
+        egui::vec2(34.0, 34.0),
     );
-    let response = ui.interact(
-        close_rect,
-        ui.id().with("modal_close"),
-        egui::Sense::click(),
-    );
+    let response = ui.interact(close_rect, ui.id().with("modal_close"), egui::Sense::click());
     painter.circle_filled(
         close_rect.center(),
-        16.0,
+        17.0,
         if response.hovered() {
-            Color32::from_rgba_unmultiplied(255, 255, 255, 60)
+            Color32::from_rgba_unmultiplied(255, 255, 255, 40)
         } else {
-            Color32::from_rgba_unmultiplied(0, 0, 0, 150)
+            Color32::from_rgba_unmultiplied(10, 12, 16, 170)
         },
     );
     painter.text(
@@ -223,7 +298,7 @@ fn hero(ui: &mut egui::Ui, game: &Game, texture: Option<&TextureHandle>) -> bool
     response.clicked()
 }
 
-// ───────────────────────── Corps ─────────────────────────
+// ───────────────────────── Corps : deux colonnes ─────────────────────────
 
 fn body(
     ui: &mut egui::Ui,
@@ -232,31 +307,62 @@ fn body(
     media: &Media,
     out: &mut Vec<Action>,
 ) {
-    stats_row(ui, game);
+    let total = ui.available_width();
+    let gap = 28.0;
+    let side = SIDE_WIDTH.min((total * 0.34).max(250.0));
 
-    heading(ui, "Description");
-    egui::Frame::new()
-        .fill(theme::BG_CARD)
-        .corner_radius(10)
-        .inner_margin(egui::Margin::same(14))
-        .show(ui, |ui| {
-            let description = if game.store == GameStore::Epic && !game.long_description.is_empty()
-            {
-                clean_epic_description(&game.long_description)
-            } else {
-                game.description.clone()
-            };
-            ui.label(or_fallback(&description, "No description available."));
-        });
-
-    heading(ui, "Additional Information");
-    info_cards(ui, game);
-    if game.store == GameStore::Epic && !game.store_info_status.is_empty() {
-        ui.add_space(6.0);
-        ui.label(widgets::muted(&game.store_info_status, 11.0));
+    // Sur une fenêtre étroite, empiler les sections évite de comprimer
+    // la description et de faire sortir la colonne Informations du cadre.
+    if total < 760.0 {
+        main_column(ui, game, state, media, out);
+        ui.add_space(28.0);
+        side_column(ui, game);
+        return;
     }
-    links(ui, game);
-    genres(ui, game);
+
+    let main = (total - side - gap).max(240.0);
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.allocate_ui_with_layout(
+            egui::vec2(main, 0.0),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.set_width(main);
+                main_column(ui, game, state, media, out);
+            },
+        );
+        ui.add_space(gap);
+        ui.allocate_ui_with_layout(
+            egui::vec2(side, 0.0),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.set_width(side);
+                side_column(ui, game);
+            },
+        );
+    });
+}
+
+fn main_column(
+    ui: &mut egui::Ui,
+    game: &Game,
+    state: &mut ModalState,
+    media: &Media,
+    out: &mut Vec<Action>,
+) {
+    stats_strip(ui, game);
+
+    heading(ui, "About");
+    let description = if game.store == GameStore::Epic && !game.long_description.is_empty() {
+        clean_epic_description(&game.long_description)
+    } else {
+        game.description.clone()
+    };
+    ui.label(
+        RichText::new(or_fallback(&description, "No description available."))
+            .size(13.0)
+            .color(theme::TEXT_MUTED),
+    );
 
     if !game.screenshots.is_empty() {
         let count = game.screenshots.len();
@@ -266,7 +372,7 @@ fn body(
             count,
             &mut state.screenshot,
             media.screenshot.as_ref(),
-            250.0,
+            280.0,
             "Loading screenshot…",
             true,
             false,
@@ -284,7 +390,7 @@ fn body(
             count,
             &mut state.trailer,
             media.trailer.as_ref(),
-            220.0,
+            240.0,
             "Trailer available",
             false,
             playable,
@@ -306,15 +412,28 @@ fn body(
             }
         }
     }
+    ui.add_space(24.0);
+}
 
+fn side_column(ui: &mut egui::Ui, game: &Game) {
+    heading(ui, "Information");
+    info_card(ui, &info_rows(game));
+    links(ui, game);
+    genres(ui, game);
+    if game.store == GameStore::Epic && !game.store_info_status.is_empty() {
+        ui.add_space(6.0);
+        ui.label(widgets::muted(&game.store_info_status, 11.0));
+    }
     game_information(ui, game);
-    footer(ui, game, out);
+    ui.add_space(24.0);
 }
 
 fn heading(ui: &mut egui::Ui, text: &str) {
     ui.add_space(20.0);
-    ui.label(RichText::new(text).size(17.0).strong());
-    ui.add_space(8.0);
+    ui.label(RichText::new(text).size(16.0).strong().color(theme::TEXT_TITLE));
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 0.0, theme::BORDER);
+    ui.add_space(12.0);
 }
 
 fn or_fallback<'a>(value: &'a str, fallback: &'a str) -> &'a str {
@@ -336,99 +455,78 @@ fn clean_epic_description(value: &str) -> String {
         .join("\n\n")
 }
 
-fn stats_row(ui: &mut egui::Ui, game: &Game) {
+/// Bandeau de chiffres clés : note, joueurs, taille, date, classification.
+fn stats_strip(ui: &mut egui::Ui, game: &Game) {
     let reviews = match game.store {
         GameStore::Epic => match game.critic_score {
             Some(score) => format!("OpenCritic {score}/100"),
             None if game.epic_stats_requested && !game.epic_stats_loaded => {
-                "Loading rating…".into()
+                "Loading…".into()
             }
-            None => "No critic rating".into(),
+            None => "No rating".into(),
         },
-        GameStore::Xbox if game.rating_count == 0 => "New game".to_owned(),
+        GameStore::Xbox if game.rating_count == 0 => "New".to_owned(),
         GameStore::Xbox => format!("{} reviews", format_count(game.rating_count)),
     };
-    let stats = [
-        (icons::star(14.0), reviews),
-        (
-            icons::players(14.0),
-            or_fallback(&game.players, "—").to_owned(),
-        ),
-        (
-            icons::storage(14.0),
-            or_fallback(&game.size, "—").to_owned(),
-        ),
-        (
-            icons::calendar(14.0),
-            or_fallback(&game.release, "N/A").to_owned(),
-        ),
-        (
-            icons::shield(14.0),
-            or_fallback(&game.rating, "—").to_owned(),
-        ),
+    let tiles = [
+        ("Rating", reviews),
+        ("Players", or_fallback(&game.players, "—").to_owned()),
+        ("Size", or_fallback(&game.size, "—").to_owned()),
+        ("Release", or_fallback(&game.release, "—").to_owned()),
+        ("Rating", or_fallback(&game.rating, "—").to_owned()),
     ];
-    let gap = 8.0;
-    let width = (ui.available_width() - gap * 4.0).max(0.0) / 5.0;
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = gap;
-        for (image, value) in stats {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 36.0), egui::Sense::hover());
-            ui.painter()
-                .rect_filled(rect, 10.0, Color32::from_rgb(30, 30, 45));
-            ui.scope_builder(
-                egui::UiBuilder::new()
-                    .max_rect(rect.shrink2(egui::vec2(6.0, 0.0)))
-                    .layout(
-                        egui::Layout::left_to_right(egui::Align::Center)
-                            .with_main_align(egui::Align::Center),
-                    ),
-                |cell| {
-                    cell.add(image);
-                    cell.add_space(5.0);
-                    cell.label(RichText::new(value).size(11.0).strong());
-                },
-            );
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+        for (label, value) in tiles {
+            egui::Frame::new()
+                .fill(theme::BG_CARD)
+                .stroke(egui::Stroke::new(1.0, theme::BORDER))
+                .corner_radius(6)
+                .inner_margin(egui::Margin::symmetric(12, 8))
+                .show(ui, |ui| {
+                    ui.set_max_width(230.0);
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(widgets::muted(label, 10.0));
+                    // Pas de troncature : la valeur passe à la ligne si elle est longue.
+                    ui.add(egui::Label::new(RichText::new(value).size(12.5).strong()).wrap());
+                });
         }
     });
 }
 
-fn info_cards(ui: &mut egui::Ui, game: &Game) {
-    let recommendation = game
-        .critic_recommend
-        .map(|percent| format!("OpenCritic recommends · {percent}%"));
-    let mut left = vec![
-        ("Publisher", game.publisher.as_str()),
-        ("Developer", game.developer.as_str()),
+fn info_rows(game: &Game) -> Vec<(String, String)> {
+    let mut rows = vec![
+        ("Publisher".to_owned(), or_fallback(&game.publisher, "—").to_owned()),
+        ("Developer".to_owned(), or_fallback(&game.developer, "—").to_owned()),
+        ("Release date".to_owned(), or_fallback(&game.release, "—").to_owned()),
     ];
-    if let Some(recommendation) = recommendation.as_deref() {
-        left.push(("Critic sentiment", recommendation));
-    }
-    let mut right = vec![("Release date", game.release.as_str())];
     if !game.platform.is_empty() {
-        right.push(("Platforms", game.platform.as_str()));
+        rows.push(("Platforms".to_owned(), game.platform.clone()));
     }
-    // `columns` : deux colonnes égales, alignées en haut (un `horizontal` centrait
-    // verticalement la carte la plus courte, d'où le décalage).
-    ui.columns(2, |columns| {
-        info_card(&mut columns[0], &left);
-        info_card(&mut columns[1], &right);
-    });
+    if let Some(percent) = game.critic_recommend {
+        rows.push(("Critic reviews".to_owned(), format!("OpenCritic recommends · {percent}%")));
+    }
+    rows
 }
 
-fn info_card(ui: &mut egui::Ui, rows: &[(&str, &str)]) {
+fn info_card(ui: &mut egui::Ui, rows: &[(String, String)]) {
     egui::Frame::new()
         .fill(theme::BG_CARD)
-        .stroke(egui::Stroke::new(1.0, theme::accent_alpha(50)))
-        .corner_radius(8)
-        .inner_margin(egui::Margin::same(12))
+        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::same(14))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
             for (index, (label, value)) in rows.iter().enumerate() {
                 if index > 0 {
-                    ui.add_space(12.0);
+                    ui.add_space(10.0);
+                    let (line, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+                    ui.painter().rect_filled(line, 0.0, theme::BORDER);
+                    ui.add_space(10.0);
                 }
-                ui.label(widgets::muted(*label, 11.0));
-                ui.label(or_fallback(value, "—"));
+                ui.label(widgets::muted(label.as_str(), 10.5));
+                ui.label(RichText::new(value.as_str()).size(12.5));
             }
         });
 }
@@ -443,17 +541,18 @@ fn links(ui: &mut egui::Ui, game: &Game) {
     }
     ui.add_space(12.0);
     ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 12.0;
         if !game.publisher_website.is_empty() {
             ui.hyperlink_to("Website", &game.publisher_website);
         }
         if !game.support_uri.is_empty() {
-            ui.hyperlink_to("Get Help", &game.support_uri);
+            ui.hyperlink_to("Support", &game.support_uri);
         }
         if !game.language.is_empty() {
-            ui.label(format!("Language: {}", game.language.to_uppercase()));
+            ui.label(widgets::muted(format!("Language: {}", game.language.to_uppercase()), 11.0));
         }
         if !game.last_modified.is_empty() {
-            ui.label(format!("Last updated: {}", game.last_modified));
+            ui.label(widgets::muted(format!("Updated: {}", game.last_modified), 11.0));
         }
     });
 }
@@ -462,44 +561,16 @@ fn genres(ui: &mut egui::Ui, game: &Game) {
     if game.genres.is_empty() {
         return;
     }
-    ui.add_space(18.0);
-    ui.horizontal_wrapped(|ui| {
-        for genre in &game.genres {
-            let text = RichText::new(genre)
-                .size(11.0)
-                .color(Color32::from_rgb(196, 181, 253));
-            let text_size = ui.fonts_mut(|fonts| {
-                fonts
-                    .layout_no_wrap(
-                        genre.clone(),
-                        egui::FontId::proportional(11.0),
-                        Color32::from_rgb(196, 181, 253),
-                    )
-                    .size()
-            });
-            let pill_width = (text_size.x + 21.0).min(ui.available_width());
-            ui.allocate_ui_with_layout(
-                egui::vec2(pill_width, 28.0),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |pill| {
-                    egui::Frame::new()
-                        .fill(theme::accent_alpha(48))
-                        .stroke(egui::Stroke::new(1.0, theme::accent_alpha(78)))
-                        .corner_radius(20)
-                        .inner_margin(egui::Margin::symmetric(10, 5))
-                        .show(pill, |content| {
-                            content.add_sized(
-                                [text_size.x, 16.0],
-                                egui::Label::new(text).truncate(),
-                            );
-                        });
-                },
-            );
-        }
-    });
+    ui.add_space(14.0);
+    // Texte simple qui passe à la ligne : pas de chips étroits, donc pas de découpage par lettre.
+    ui.add(
+        egui::Label::new(widgets::muted(game.genres.join("  ·  "), 11.5))
+            .wrap(),
+    );
 }
 
 // ───────────────────────── Carrousel ─────────────────────────
+
 
 fn carousel(
     ui: &mut egui::Ui,
@@ -662,7 +733,7 @@ fn game_information(ui: &mut egui::Ui, game: &Game) {
     {
         return;
     }
-    heading(ui, "Game Information");
+    heading(ui, "About this game");
     ui.columns(3, |columns| {
         if let Some(achievements) = game.achievements {
             stat_block(
@@ -704,31 +775,46 @@ fn features(ui: &mut egui::Ui, game: &Game) {
             Color32::from_rgba_unmultiplied(16, 185, 129, 70),
         ))
         .corner_radius(8)
-        .inner_margin(egui::Margin::same(12))
+        .inner_margin(egui::Margin::same(14))
         .show(ui, |ui| {
+            ui.set_width(ui.available_width());
             ui.label(
                 RichText::new("Features")
                     .size(13.0)
                     .strong()
                     .color(theme::EMERALD),
             );
-            ui.label(widgets::muted("Capabilities & compatibility", 11.0));
-            ui.add_space(8.0);
-            // Deux groupes par colonne : (Multiplayer, Graphics) | (Compatibility, Xbox Live).
-            ui.columns(2, |columns| {
-                for (column, groups) in columns.iter_mut().zip(FeatureGroup::ALL.chunks(2)) {
-                    for &group in groups {
-                        let entries: Vec<&GameAttribute> = game
-                            .attributes
-                            .iter()
-                            .filter(|a| a.group() == group)
-                            .collect();
-                        if entries.is_empty() {
-                            continue;
-                        }
-                        feature_box(column, group, &entries);
-                        column.add_space(8.0);
+            ui.label(widgets::muted("Capabilities and compatibility", 11.0));
+            ui.add_space(12.0);
+
+            let available = ui.available_width();
+            let gap = 12.0;
+            let column_width = ((available - gap) * 0.5).max(120.0);
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                for (column_index, groups) in FeatureGroup::ALL.chunks(2).enumerate() {
+                    if column_index > 0 {
+                        ui.add_space(gap);
                     }
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(column_width, 0.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |column| {
+                            column.set_width(column_width);
+                            for &group in groups {
+                                let entries: Vec<&GameAttribute> = game
+                                    .attributes
+                                    .iter()
+                                    .filter(|attribute| attribute.group() == group)
+                                    .collect();
+                                if entries.is_empty() {
+                                    continue;
+                                }
+                                feature_box(column, group, &entries);
+                                column.add_space(10.0);
+                            }
+                        },
+                    );
                 }
             });
         });
@@ -741,10 +827,11 @@ fn feature_box(ui: &mut egui::Ui, group: FeatureGroup, entries: &[&GameAttribute
             1.0,
             Color32::from_rgba_unmultiplied(16, 185, 129, 45),
         ))
-        .corner_radius(8)
+        .corner_radius(6)
         .inner_margin(egui::Margin::same(10))
         .show(ui, |section| {
-            section.set_min_width(section.available_width());
+            section.set_width(section.available_width());
+            section.spacing_mut().item_spacing.y = 5.0;
             section.label(
                 RichText::new(group.title())
                     .size(11.0)
@@ -765,38 +852,21 @@ fn feature_box(ui: &mut egui::Ui, group: FeatureGroup, entries: &[&GameAttribute
         });
 }
 
-fn footer(ui: &mut egui::Ui, game: &Game, out: &mut Vec<Action>) {
-    ui.add_space(18.0);
-    ui.horizontal(|ui| match game.store {
-        GameStore::Xbox => {
-            if ui.add(FluentButton::accent("Download")).clicked() {
-                out.push(Action::PrepareDownload {
-                    id: game.id.clone(),
-                    name: game.display_name().to_owned(),
-                    store: game.store,
-                });
-            }
-            if ui.add(FluentButton::accent("Open in Xbox")).clicked() {
-                open_store_page(&game.id);
-            }
-        }
-        GameStore::Epic => {
-            if ui.add(FluentButton::accent("Download")).clicked() {
-                out.push(Action::PrepareDownload {
-                    id: game.id.clone(),
-                    name: game.display_name().to_owned(),
-                    store: game.store,
-                });
-            }
-            // Page officielle Epic en priorité ; l'ancien lien tiers ne sert que de secours.
-            let info_url = if game.store_url.is_empty() {
-                game.egdata_url.as_str()
-            } else {
-                game.store_url.as_str()
-            };
-            if !info_url.is_empty() && ui.button("More game info").clicked() {
-                let _ = webbrowser::open(info_url);
-            }
-        }
-    });
+
+// ───────────────────────── Gradient ─────────────────────────
+
+/// Dégradé à quatre coins [haut-gauche, haut-droit, bas-droit, bas-gauche], peint en maillage.
+fn gradient(painter: &egui::Painter, rect: egui::Rect, corners: [Color32; 4]) {
+    let mut mesh = Mesh::default();
+    let points = [rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom()];
+    for (pos, color) in points.into_iter().zip(corners) {
+        mesh.vertices.push(Vertex {
+            pos,
+            uv: WHITE_UV,
+            color,
+        });
+    }
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    painter.add(egui::Shape::mesh(mesh));
 }

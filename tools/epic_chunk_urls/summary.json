@@ -1,0 +1,60 @@
+[
+  {
+    "name": "HITMAN 3",
+    "appName": "Eider",
+    "metadataSource": "library",
+    "catalogTitle": "",
+    "manifestVersion": 17,
+    "chunkCount": 79019,
+    "chunkDir": "ChunksV4",
+    "organization": "o-ank8fbh38u9uzqbag2a5yt5xexb4yr",
+    "build": "ea809c29128841688fb20f6bf85f9c11",
+    "cloudDir": "default",
+    "cdnBases": [
+      "https://egs-cloudfront-chunks.epicgamescdn.com/Builds/Org/o-ank8fbh38u9uzqbag2a5yt5xexb4yr/ea809c29128841688fb20f6bf85f9c11/default",
+      "https://epicgames-download1.akamaized.net/Builds/Org/o-ank8fbh38u9uzqbag2a5yt5xexb4yr/ea809c29128841688fb20f6bf85f9c11/default",
+      "https://egdownload.fastly-edge.com/Builds/Org/o-ank8fbh38u9uzqbag2a5yt5xexb4yr/ea809c29128841688fb20f6bf85f9c11/default"
+    ],
+    "urlFile": "Eider_Windows_10815549.txt",
+    "chunkDataFile": "chunks/Eider_Windows_10815549.json"
+  },
+  {
+    "name": "Assassins Creed Syndicate",
+    "appName": "Albacore",
+    "metadataSource": "manifest-index",
+    "catalogTitle": "Assassins Creed Syndicate",
+    "manifestVersion": 17,
+    "chunkCount": 49186,
+    "chunkDir": "ChunksV4",
+    "organization": "o-3efjudxdtgsqnulml4bkeq3v9nec38",
+    "build": "3a7c73c4b6ed4f4682af15c2d6e38669",
+    "cloudDir": "default",
+    "cdnBases": [
+      "https://google.epicgamescdn.com/Builds/Org/o-3efjudxdtgsqnulml4bkeq3v9nec38/3a7c73c4b6ed4f4682af15c2d6e38669/default",
+      "https://egs-cloudfront-chunks.epicgamescdn.com/Builds/Org/o-3efjudxdtgsqnulml4bkeq3v9nec38/3a7c73c4b6ed4f4682af15c2d6e38669/default",
+      "https://epicgames-download1.akamaized.net/Builds/Org/o-3efjudxdtgsqnulml4bkeq3v9nec38/3a7c73c4b6ed4f4682af15c2d6e38669/default",
+      "https://egdownload.fastly-edge.com/Builds/Org/o-3efjudxdtgsqnulml4bkeq3v9nec38/3a7c73c4b6ed4f4682af15c2d6e38669/default"
+    ],
+    "urlFile": "Assassins Creed Syndicate.txt",
+    "chunkDataFile": "chunks/Assassins Creed Syndicate.json"
+  },
+  {
+    "name": "Watch Dogs 2",
+    "appName": "Angelonia",
+    "metadataSource": "manifest-index",
+    "catalogTitle": "Watch Dogs 2",
+    "manifestVersion": 17,
+    "chunkCount": 38676,
+    "chunkDir": "ChunksV4",
+    "organization": "o-3efjudxdtgsqnulml4bkeq3v9nec38",
+    "build": "Angelonia",
+    "cloudDir": "default",
+    "cdnBases": [
+      "https://egdownload.fastly-edge.com/Builds/Org/o-3efjudxdtgsqnulml4bkeq3v9nec38/Angelonia/default",
+      "https://epicgames-download1.akamaized.net/Builds/Org/o-3efjudxdtgsqnulml4bkeq3v9nec38/Angelonia/default",
+      "https://egs-cloudfront-chunks.epicgamescdn.com/Builds/Org/o-3efjudxdtgsqnulml4bkeq3v9nec38/Angelonia/default"
+    ],
+    "urlFile": "Watch Dogs 2.txt",
+    "chunkDataFile": "chunks/Watch Dogs 2.json"
+  }
+]

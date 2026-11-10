@@ -10,8 +10,8 @@ use crate::settings::Settings;
 use crate::ui::game_modal::ModalState;
 use crate::ui::{
     Action, CatalogSelection, Page, catalog_page, download_location_modal, downloads_page,
-    game_modal, home, library_page, settings_page, sidebar, theme, trailer_overlay,
-    uninstall_modal, updates_page,
+    game_modal, home, library_page, settings_page, sidebar, theme, topbar, trailer_overlay,
+    uninstall_modal, updates_page, window,
 };
 use crate::updates::UpdateCheck;
 use eframe::egui;
@@ -22,7 +22,6 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
-const SIDEBAR_W: f32 = 232.0;
 const MAIN_MARGIN: f32 = 28.0;
 
 struct PendingDownload {
@@ -171,17 +170,16 @@ impl App {
             .filter(|exe| !exe.is_empty());
         let tx = self.shortcut_tx.clone();
         std::thread::spawn(move || {
-            let message =
-                match library::create_shortcut(
-                    &name,
-                    &folder,
-                    store,
-                    launch_exe.as_deref(),
-                    product_id.as_deref(),
-                ) {
-                    Ok(path) => format!("Desktop shortcut created: {}", path.display()),
-                    Err(error) => format!("Could not create desktop shortcut: {error}"),
-                };
+            let message = match library::create_shortcut(
+                &name,
+                &folder,
+                store,
+                launch_exe.as_deref(),
+                product_id.as_deref(),
+            ) {
+                Ok(path) => format!("Desktop shortcut created: {}", path.display()),
+                Err(error) => format!("Could not create desktop shortcut: {error}"),
+            };
             let _ = tx.send(message);
         });
     }
@@ -216,7 +214,9 @@ impl App {
         }
         let epic_info_updates: Vec<_> = self.epic_info_rx.try_iter().collect();
         let epic_info_changed = !epic_info_updates.is_empty();
-        self.epic_info_pending = self.epic_info_pending.saturating_sub(epic_info_updates.len());
+        self.epic_info_pending = self
+            .epic_info_pending
+            .saturating_sub(epic_info_updates.len());
         for (id, result) in epic_info_updates {
             let Some(game) = self
                 .epic_catalog
@@ -236,8 +236,7 @@ impl App {
                         "No matching Epic Games store listing — showing catalog data.".into();
                 }
                 Err(error) => {
-                    game.store_info_status =
-                        format!("Epic Games store info unavailable: {error}");
+                    game.store_info_status = format!("Epic Games store info unavailable: {error}");
                 }
             }
         }
@@ -426,11 +425,10 @@ impl App {
                 if let Some(pending) = self.pending_download.take() {
                     self.page = Page::Downloads;
                     let result = match pending.store {
-                        GameStore::Xbox => self.downloads.start_xbox(
-                            &pending.id,
-                            &pending.name,
-                            &directory,
-                        ),
+                        GameStore::Xbox => {
+                            self.downloads
+                                .start_xbox(&pending.id, &pending.name, &directory)
+                        }
                         GameStore::Epic => {
                             if let Some(game) = self.epic_catalog.game(&pending.id).cloned() {
                                 self.downloads.start_epic(&game, &directory)
@@ -559,29 +557,25 @@ impl App {
     fn show_chrome(&mut self, root: &mut egui::Ui, out: &mut Vec<Action>) {
         root.winui(|ui| {
             let area = ui.ctx().input(|i| i.viewport_rect());
-            let side = egui::Rect::from_min_size(area.min, egui::vec2(SIDEBAR_W, area.height()));
+            let bar = egui::Rect::from_min_size(
+                area.min,
+                egui::vec2(area.width(), topbar::HEIGHT),
+            );
             let main = egui::Rect::from_min_max(
-                egui::pos2(side.max.x + MAIN_MARGIN, area.min.y),
-                egui::pos2(
-                    (area.max.x - MAIN_MARGIN).max(side.max.x + 300.0),
-                    area.max.y,
-                ),
+                egui::pos2(area.min.x + MAIN_MARGIN, bar.max.y),
+                egui::pos2(area.max.x - MAIN_MARGIN, area.max.y),
             );
 
             ui.painter().rect_filled(area, 0, theme::BG_APP);
-            ui.painter().rect_filled(side, 0, theme::BG_SIDEBAR);
-            ui.painter().vline(
-                side.max.x,
-                area.y_range(),
-                ui.visuals().widgets.noninteractive.bg_stroke,
-            );
 
             let page = self.page;
+            let download =
+                sidebar::DownloadSummary::current(&self.downloads, &self.catalog, &self.epic_catalog);
             ui.scope_builder(
                 egui::UiBuilder::new()
-                    .max_rect(side.shrink2(egui::vec2(18.0, 0.0)))
-                    .layout(egui::Layout::top_down(egui::Align::Min)),
-                |ui| sidebar::show(ui, page, out),
+                    .max_rect(bar)
+                    .layout(egui::Layout::left_to_right(egui::Align::Min)),
+                |ui| topbar::show(ui, page, download.as_ref(), out),
             );
             ui.scope_builder(
                 egui::UiBuilder::new()
@@ -589,6 +583,10 @@ impl App {
                     .layout(egui::Layout::top_down(egui::Align::Min)),
                 |ui| self.show_page(ui, out),
             );
+
+            // En dernier : les poignées de redimensionnement passent au-dessus du contenu.
+            window::resize_edges(ui, area);
+            window::paint_border(ui.ctx(), area);
         });
     }
 

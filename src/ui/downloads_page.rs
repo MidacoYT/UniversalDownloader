@@ -1,12 +1,45 @@
-//! Page des téléchargements : tâches actives et fichiers terminés.
+//! Téléchargements : en-tête avec débit global, filtres, transferts en cours avec
+//! progression et commandes, historique des jeux terminés et liste des échecs.
 use super::{icons, theme, widgets};
 use crate::catalog::Catalog;
 use crate::downloads::{Download, DownloadManager, DownloadStatus};
 use crate::images::{self, ImageCache};
-use crate::model::Game;
+use crate::model::{Game, GameStore};
 use crate::util::{format_size, open_folder};
 use eframe::egui::{self, Color32, RichText};
-use fluent_egui::winui::prelude::*;
+
+const DONE_MIN_WIDTH: f32 = 360.0;
+const GRID_GAP: f32 = 14.0;
+
+/// Filtre d'affichage, conservé d'une frame à l'autre dans la mémoire de l'UI.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum Filter {
+    #[default]
+    All,
+    Active,
+    Done,
+    Failed,
+}
+
+impl Filter {
+    const ALL: [Self; 4] = [Self::All, Self::Active, Self::Done, Self::Failed];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Active => "Active",
+            Self::Done => "Completed",
+            Self::Failed => "Failed",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum DownloadAction {
+    Pause,
+    Resume,
+    Cancel,
+}
 
 pub fn show(
     ui: &mut egui::Ui,
@@ -15,94 +48,49 @@ pub fn show(
     images: &mut ImageCache,
     downloads: &mut DownloadManager,
 ) {
-    let active_count = downloads
-        .entries
-        .iter()
-        .filter(|entry| is_active(&entry.status))
-        .count();
-    widgets::page_header(
-        ui,
-        "TRANSFERS",
-        "Downloads",
-        &format!(
-            "{active_count} download{} in progress",
-            if active_count == 1 { "" } else { "s" }
-        ),
-    );
+    let filter_id = ui.id().with("downloads_filter");
+    let mut filter = ui.data_mut(|d| d.get_temp::<Filter>(filter_id).unwrap_or_default());
 
+    header(ui, &downloads.entries);
+    ui.add_space(18.0);
+    stats(ui, &downloads.entries);
+    ui.add_space(20.0);
+    filter_bar(ui, &mut filter);
+    ui.data_mut(|d| d.insert_temp(filter_id, filter));
+    ui.add_space(14.0);
+
+    let counts = Counts::of(&downloads.entries);
+    let visible = match filter {
+        Filter::All => counts.active + counts.done + counts.failed,
+        Filter::Active => counts.active,
+        Filter::Done => counts.done,
+        Filter::Failed => counts.failed,
+    };
+
+    let mut actions = Vec::new();
     egui::ScrollArea::vertical()
         .id_salt("downloads_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            ui.set_max_width(850.0);
             if !downloads.notice.is_empty() {
-                ui.add_space(6.0);
                 ui.label(RichText::new(&downloads.notice).color(theme::DANGER));
+                ui.add_space(10.0);
             }
-            ui.add_space(18.0);
-            active_section(ui, catalog, epic_catalog, images, downloads);
-            completed_section(ui, catalog, epic_catalog, images, downloads);
-            failed_section(ui, downloads);
+            if visible == 0 {
+                empty_state(ui, filter, downloads.entries.is_empty());
+            }
+            if matches!(filter, Filter::All | Filter::Active) {
+                active_section(ui, catalog, epic_catalog, images, &downloads.entries, &mut actions);
+            }
+            if matches!(filter, Filter::All | Filter::Done) {
+                done_section(ui, catalog, epic_catalog, images, &downloads.entries);
+            }
+            if matches!(filter, Filter::All | Filter::Failed) {
+                failed_section(ui, &downloads.entries);
+            }
+            ui.add_space(40.0);
         });
-}
 
-fn active_section(
-    ui: &mut egui::Ui,
-    catalog: &Catalog,
-    epic_catalog: &Catalog,
-    images: &mut ImageCache,
-    downloads: &mut DownloadManager,
-) {
-    let active_count = downloads
-        .entries
-        .iter()
-        .filter(|entry| is_active(&entry.status))
-        .count();
-    ui.horizontal(|ui| {
-        ui.add(icons::download(16.0));
-        ui.label(
-            RichText::new(format!("In Progress ({active_count})"))
-                .size(17.0)
-                .strong(),
-        );
-    });
-    ui.add_space(10.0);
-
-    if active_count == 0 {
-        egui::Frame::new()
-            .fill(theme::BG_CARD)
-            .stroke(egui::Stroke::new(1.0, theme::accent_alpha(45)))
-            .corner_radius(14)
-            .inner_margin(egui::Margin::symmetric(20, 32))
-            .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                ui.vertical_centered(|ui| {
-                    ui.label(RichText::new("📭").size(38.0));
-                    ui.add_space(8.0);
-                    ui.label(
-                        RichText::new("No active downloads")
-                            .strong()
-                            .color(theme::TEXT_MUTED),
-                    );
-                    ui.label(widgets::muted(
-                        "Downloads started from a game's page will appear here.",
-                        11.0,
-                    ));
-                });
-            });
-        return;
-    }
-
-    let mut actions = Vec::new();
-    for entry in downloads
-        .entries
-        .iter()
-        .rev()
-        .filter(|entry| is_active(&entry.status))
-    {
-        download_card(ui, entry, catalog, epic_catalog, images, &mut actions);
-        ui.add_space(10.0);
-    }
     for (id, action) in actions {
         match action {
             DownloadAction::Pause => downloads.pause(id),
@@ -112,254 +100,392 @@ fn active_section(
     }
 }
 
-fn download_card(
-    ui: &mut egui::Ui,
-    entry: &Download,
-    catalog: &Catalog,
-    epic_catalog: &Catalog,
-    images: &mut ImageCache,
-    actions: &mut Vec<(u64, DownloadAction)>,
-) {
-    let game = catalog
-        .games
-        .iter()
-        .chain(epic_catalog.games.iter())
-        .find(|game| game.name.eq_ignore_ascii_case(&entry.name));
-    ui.winui(|ui| {
-        egui::Frame::new()
-            .fill(theme::BG_CARD)
-            .stroke(egui::Stroke::new(1.0, theme::accent_alpha(45)))
-            .corner_radius(12)
-            .inner_margin(egui::Margin::same(16))
-            .show(ui, |card| {
-                card.set_min_width(card.available_width());
-                card.horizontal(|row| {
-                    if let Some(game) = game {
-                        cover(row, game, images, (76.0, 76.0));
-                    } else {
-                        let (rect, _) = row.allocate_exact_size(egui::vec2(76.0, 76.0), egui::Sense::hover());
-                        row.painter()
-                            .rect_filled(rect, 10.0, theme::accent_alpha(45));
-                        row.painter().text(
-                            rect.center(),
-                            egui::Align2::CENTER_CENTER,
-                            "↓",
-                            egui::FontId::proportional(24.0),
-                            theme::ACCENT_LIGHT,
-                        );
-                    }
+// ───────────────────────── En-tête et statistiques ─────────────────────────
 
-                    row.vertical(|details| {
-                        details.set_min_width(details.available_width());
-                        details.label(RichText::new(&entry.name).size(17.0).strong());
-                        details.label(widgets::muted(download_subtitle(entry, game), 12.0));
-                        details.add_space(5.0);
-                        details.horizontal(|line| {
-                            line.add(icons::download(13.0));
-                            line.label(status_text(&entry.status));
-                            let mut parts = Vec::new();
-                            if entry.total > 0 {
-                                parts.push(format!(
-                                    "{} / {}",
-                                    format_size(entry.received),
-                                    format_size(entry.total)
-                                ));
-                            } else if entry.received > 0 {
-                                parts.push(format_size(entry.received));
-                            }
-                            if entry.speed > 0 {
-                                parts.push(format_speed(entry.speed));
-                            }
-                            if entry.total > entry.received && entry.speed > 0 {
-                                parts.push(format!(
-                                    "{} left",
-                                    format_eta(entry.total - entry.received, entry.speed)
-                                ));
-                            }
-                            if !parts.is_empty() {
-                                line.label(widgets::muted(parts.join("  ·  "), 11.0));
-                            }
-                        });
-                        details.add_space(5.0);
-                        if entry.total > 0 {
-                            let progress =
-                                (entry.received as f32 / entry.total as f32).clamp(0.0, 1.0);
-                            details.horizontal(|progress_row| {
-                                let percent_width = 42.0;
-                                let bar_width =
-                                    (progress_row.available_width() - percent_width).max(24.0);
-                                // `desired_height` : `add_sized` ne réduit pas la barre, elle
-                                // garde sa hauteur par défaut.
-                                progress_row.add(
-                                    egui::ProgressBar::new(progress)
-                                        .desired_width(bar_width)
-                                        .desired_height(4.0)
-                                        .corner_radius(2)
-                                        .fill(if entry.status == DownloadStatus::Paused {
-                                            theme::GOLD
-                                        } else {
-                                            theme::ACCENT_LIGHT
-                                        }),
-                                );
-                                progress_row.add_sized(
-                                    [percent_width, 18.0],
-                                    egui::Label::new(
-                                        RichText::new(format!("{:.0}%", progress * 100.0))
-                                            .size(11.0)
-                                            .color(theme::TEXT_MUTED),
-                                    )
-                                    .halign(egui::Align::RIGHT),
-                                );
-                            });
-                        } else {
-                            details.add(
-                                egui::ProgressBar::new(0.0)
-                                    .desired_height(4.0)
-                                    .corner_radius(2)
-                                    .animate(true),
-                            );
-                        }
-                        details.horizontal(|buttons| match entry.status {
-                            DownloadStatus::Extracting | DownloadStatus::Registering => {
-                                if buttons
-                                    .add(egui::Button::image_and_text(icons::pause(12.0), "Pause"))
-                                    .clicked()
-                                {
-                                    actions.push((entry.id, DownloadAction::Pause));
-                                }
-                                if buttons
-                                    .add(egui::Button::image_and_text(
-                                        icons::cancel(12.0),
-                                        "Cancel",
-                                    ))
-                                    .clicked()
-                                {
-                                    actions.push((entry.id, DownloadAction::Cancel));
-                                }
-                            }
-                            DownloadStatus::Paused => {
-                                if buttons
-                                    .add(egui::Button::image_and_text(icons::play(12.0), "Resume"))
-                                    .clicked()
-                                {
-                                    actions.push((entry.id, DownloadAction::Resume));
-                                }
-                                if buttons
-                                    .add(egui::Button::image_and_text(
-                                        icons::cancel(12.0),
-                                        "Cancel",
-                                    ))
-                                    .clicked()
-                                {
-                                    actions.push((entry.id, DownloadAction::Cancel));
-                                }
-                            }
-                            _ => {
-                                if buttons
-                                    .add(egui::Button::image_and_text(icons::pause(12.0), "Pause"))
-                                    .clicked()
-                                {
-                                    actions.push((entry.id, DownloadAction::Pause));
-                                }
-                                if buttons
-                                    .add(egui::Button::image_and_text(
-                                        icons::cancel(12.0),
-                                        "Cancel",
-                                    ))
-                                    .clicked()
-                                {
-                                    actions.push((entry.id, DownloadAction::Cancel));
-                                }
-                            }
-                        });
-                    });
-                });
-            });
+struct Counts {
+    active: usize,
+    done: usize,
+    failed: usize,
+    speed: u64,
+}
+
+impl Counts {
+    fn of(entries: &[Download]) -> Self {
+        Self {
+            active: entries.iter().filter(|e| is_active(&e.status)).count(),
+            done: entries
+                .iter()
+                .filter(|e| e.status == DownloadStatus::Completed)
+                .count(),
+            failed: entries
+                .iter()
+                .filter(|e| matches!(e.status, DownloadStatus::Failed(_)))
+                .count(),
+            speed: entries
+                .iter()
+                .filter(|e| is_running(&e.status))
+                .map(|e| e.speed)
+                .sum(),
+        }
+    }
+}
+
+fn header(ui: &mut egui::Ui, entries: &[Download]) {
+    let counts = Counts::of(entries);
+    ui.add_space(24.0);
+    ui.vertical(|ui| {
+        ui.label(
+            RichText::new("Downloads")
+                .size(34.0)
+                .strong()
+                .color(theme::TEXT_TITLE),
+        );
+        ui.label(
+            RichText::new(format!(
+                "{} active  ·  {} completed  ·  {} failed",
+                counts.active, counts.done, counts.failed
+            ))
+            .size(13.0)
+            .color(theme::TEXT_MUTED),
+        );
     });
 }
 
-fn completed_section(
+fn stats(ui: &mut egui::Ui, entries: &[Download]) {
+    let counts = Counts::of(entries);
+    let gap = 12.0;
+    let width = ((ui.available_width() - gap * 3.0) / 4.0).floor();
+    let speed = if counts.speed > 0 {
+        format_speed(counts.speed)
+    } else {
+        "Idle".to_owned()
+    };
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        stat_tile(ui, width, "ACTIVE", &counts.active.to_string(), "active transfers");
+        stat_tile(ui, width, "SPEED", &speed, "total speed");
+        stat_tile(ui, width, "COMPLETED", &counts.done.to_string(), "games downloaded");
+        stat_tile(ui, width, "FAILED", &counts.failed.to_string(), "to retry");
+    });
+}
+
+fn stat_tile(ui: &mut egui::Ui, width: f32, caption: &str, value: &str, hint: &str) {
+    egui::Frame::new()
+        .fill(theme::BG_CARD)
+        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+        .corner_radius(10)
+        .inner_margin(egui::Margin::symmetric(16, 12))
+        .show(ui, |ui| {
+            ui.set_width(width - 32.0);
+            ui.label(
+                RichText::new(caption)
+                    .size(10.5)
+                    .strong()
+                    .color(theme::ACCENT_LIGHT),
+            );
+            ui.add(
+                egui::Label::new(RichText::new(value).size(20.0).strong().color(theme::TEXT_TITLE))
+                    .truncate(),
+            );
+            ui.add(
+                egui::Label::new(RichText::new(hint).size(11.0).color(theme::TEXT_SUBTLE))
+                    .truncate(),
+            );
+        });
+}
+
+fn filter_bar(ui: &mut egui::Ui, filter: &mut Filter) {
+    egui::Frame::new()
+        .fill(theme::BG_SIDEBAR)
+        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+        .corner_radius(9)
+        .inner_margin(egui::Margin::same(3))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                for option in Filter::ALL {
+                    if segment(ui, option.label(), *filter == option).clicked() {
+                        *filter = option;
+                    }
+                }
+            });
+        });
+}
+
+fn segment(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
+    let galley = ui.painter().layout_no_wrap(
+        text.to_owned(),
+        egui::FontId::proportional(12.5),
+        Color32::PLACEHOLDER,
+    );
+    let size = egui::vec2(galley.size().x + 28.0, 30.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let hover = ui
+        .ctx()
+        .animate_bool_with_time(response.id.with("segment-hover"), response.hovered(), 0.1);
+    let fill = if selected {
+        theme::ACCENT
+    } else {
+        theme::mix((14, 17, 23), (36, 42, 56), hover)
+    };
+    let text_color = if selected {
+        Color32::WHITE
+    } else {
+        theme::TEXT_MUTED.lerp_to_gamma(theme::TEXT_TITLE, hover)
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, 7.0, fill);
+    let pos = egui::pos2(
+        rect.center().x - galley.size().x / 2.0,
+        rect.center().y - galley.size().y / 2.0,
+    );
+    painter.galley(pos, galley, text_color);
+    response
+}
+
+// ───────────────────────── Transferts en cours ─────────────────────────
+
+fn active_section(
     ui: &mut egui::Ui,
     catalog: &Catalog,
     epic_catalog: &Catalog,
     images: &mut ImageCache,
-    downloads: &DownloadManager,
+    entries: &[Download],
+    actions: &mut Vec<(u64, DownloadAction)>,
 ) {
-    let completed: Vec<_> = downloads
-        .entries
-        .iter()
-        .filter(|entry| entry.status == DownloadStatus::Completed)
-        .collect();
-    if completed.is_empty() {
+    // File : le transfert en cours en tête, les suivants dans l'ordre de lancement.
+    let mut active: Vec<&Download> = entries.iter().filter(|e| is_active(&e.status)).collect();
+    if active.is_empty() {
         return;
     }
-    ui.add_space(16.0);
+    active.sort_by_key(|e| (!is_running(&e.status), e.id));
+
+    section_title(ui, "Active", active.len(), theme::ACCENT_LIGHT);
+    for entry in active {
+        let game = find_game(catalog, epic_catalog, &entry.name);
+        transfer_row(ui, entry, game, images, actions);
+        ui.add_space(10.0);
+    }
+    ui.add_space(14.0);
+}
+
+fn transfer_row(
+    ui: &mut egui::Ui,
+    entry: &Download,
+    game: Option<&Game>,
+    images: &mut ImageCache,
+    actions: &mut Vec<(u64, DownloadAction)>,
+) {
+    egui::Frame::new()
+        .fill(theme::BG_CARD)
+        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+        .corner_radius(12)
+        .inner_margin(egui::Margin::symmetric(16, 14))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 16.0;
+                cover(ui, game, entry, images, egui::vec2(72.0, 72.0));
+                let info_w = (ui.available_width() - 150.0).max(200.0);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(info_w, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| transfer_info(ui, entry, game),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    transfer_buttons(ui, entry, actions);
+                });
+            });
+        });
+}
+
+fn transfer_info(ui: &mut egui::Ui, entry: &Download, game: Option<&Game>) {
+    ui.spacing_mut().item_spacing.y = 3.0;
+    ui.add(egui::Label::new(RichText::new(&entry.name).size(16.0).strong()).truncate());
+    ui.add(egui::Label::new(widgets::muted(download_subtitle(entry, game), 11.0)).truncate());
+    ui.add_space(4.0);
+
     ui.horizontal(|ui| {
-        ui.label(RichText::new("✓").color(theme::GREEN).strong());
-        ui.label(
-            RichText::new(format!("Completed ({})", completed.len()))
-                .size(17.0)
-                .strong(),
-        );
+        ui.spacing_mut().item_spacing.x = 10.0;
+        if is_verifying(entry) {
+            ui.label(
+                RichText::new("Verifying files")
+                    .size(12.0)
+                    .strong()
+                    .color(theme::ACCENT_LIGHT),
+            );
+        } else {
+            ui.label(status_text(&entry.status).size(12.0));
+        }
+        let line = metrics(entry);
+        if !line.is_empty() {
+            ui.label(widgets::muted(line, 11.0));
+        }
     });
-    ui.add_space(10.0);
-    for entry in completed.into_iter().rev() {
-        let game = catalog
-            .games
-            .iter()
-            .chain(epic_catalog.games.iter())
-            .find(|game| game.name.eq_ignore_ascii_case(&entry.name));
-        ui.winui(|ui| {
-            egui::Frame::new()
-                .fill(theme::BG_CARD)
-                .stroke(egui::Stroke::new(1.0, theme::accent_alpha(45)))
-                .corner_radius(12)
-                .inner_margin(egui::Margin::same(14))
-                .show(ui, |card| {
-                card.set_min_width(card.available_width());
-                card.horizontal(|row| {
-                    if let Some(game) = game {
-                        cover(row, game, images, (60.0, 60.0));
-                    } else {
-                        let (rect, _) =
-                            row.allocate_exact_size(egui::vec2(44.0, 44.0), egui::Sense::hover());
-                        row.painter()
-                            .rect_filled(rect, 8.0, theme::accent_alpha(45));
-                        row.painter().text(
-                            rect.center(),
-                            egui::Align2::CENTER_CENTER,
-                            "✓",
-                            egui::FontId::proportional(18.0),
-                            theme::GREEN,
+    ui.add_space(6.0);
+
+    if entry.total > 0 {
+        let progress = (entry.received as f32 / entry.total as f32).clamp(0.0, 1.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            let bar_w = (ui.available_width() - 44.0).max(40.0);
+            progress_bar(ui, bar_w, 6.0, progress, bar_color(entry));
+            ui.add_sized(
+                [34.0, 16.0],
+                egui::Label::new(
+                    RichText::new(format!("{:.0}%", progress * 100.0))
+                        .size(11.0)
+                        .color(theme::TEXT_MUTED),
+                )
+                .halign(egui::Align::RIGHT),
+            );
+        });
+    } else {
+        ui.add(
+            egui::ProgressBar::new(0.0)
+                .desired_height(6.0)
+                .corner_radius(3)
+                .animate(true),
+        );
+    }
+
+    // Ubisoft : l'installateur est extrait pendant que les paquets se téléchargent.
+    if let Some(percent) = entry.installer_percent {
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            let bar_w = (ui.available_width() - 200.0).max(40.0);
+            progress_bar(ui, bar_w, 3.0, percent as f32 / 100.0, theme::GREEN);
+            ui.label(
+                RichText::new(format!("Extracting installer  {percent}%"))
+                    .size(10.5)
+                    .color(theme::TEXT_MUTED),
+            );
+        });
+    }
+}
+
+fn transfer_buttons(ui: &mut egui::Ui, entry: &Download, actions: &mut Vec<(u64, DownloadAction)>) {
+    ui.spacing_mut().item_spacing.x = 6.0;
+    // Ordre de droite à gauche : annuler est le plus à droite.
+    if ghost(ui, icons::cancel(15.0), "Cancel", theme::DANGER) {
+        actions.push((entry.id, DownloadAction::Cancel));
+    }
+    if entry.status == DownloadStatus::Paused {
+        if ghost(ui, icons::play(15.0), "Resume", theme::ACCENT_LIGHT) {
+            actions.push((entry.id, DownloadAction::Resume));
+        }
+    } else if ghost(ui, icons::pause(15.0), "Pause", theme::TEXT_MUTED) {
+        actions.push((entry.id, DownloadAction::Pause));
+    }
+}
+
+/// Bouton icône sans fond, bordure fine, avec infobulle. Retourne `true` si cliqué.
+fn ghost(ui: &mut egui::Ui, image: egui::Image<'static>, tooltip: &str, tint: Color32) -> bool {
+    let button = egui::Button::image(image.tint(tint))
+        .min_size(egui::vec2(36.0, 36.0))
+        .fill(Color32::TRANSPARENT)
+        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+        .corner_radius(8);
+    ui.add(button).on_hover_text(tooltip).clicked()
+}
+
+// ───────────────────────── Historique ─────────────────────────
+
+fn done_section(
+    ui: &mut egui::Ui,
+    catalog: &Catalog,
+    epic_catalog: &Catalog,
+    images: &mut ImageCache,
+    entries: &[Download],
+) {
+    // Les plus récents d'abord.
+    let done: Vec<&Download> = entries
+        .iter()
+        .filter(|e| e.status == DownloadStatus::Completed)
+        .rev()
+        .collect();
+    if done.is_empty() {
+        return;
+    }
+    section_title(ui, "Completed", done.len(), theme::GREEN);
+
+    let available = ui.available_width();
+    let columns = (((available + GRID_GAP) / (DONE_MIN_WIDTH + GRID_GAP)).floor() as usize)
+        .clamp(1, 3);
+    let width = ((available - GRID_GAP * (columns - 1) as f32) / columns as f32).floor();
+
+    for chunk in done.chunks(columns) {
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = GRID_GAP;
+            for entry in chunk {
+                let game = find_game(catalog, epic_catalog, &entry.name);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(width, 1.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(width);
+                        done_card(ui, entry, game, images, width);
+                    },
+                );
+            }
+        });
+        ui.add_space(GRID_GAP);
+    }
+    ui.add_space(14.0);
+}
+
+fn done_card(
+    ui: &mut egui::Ui,
+    entry: &Download,
+    game: Option<&Game>,
+    images: &mut ImageCache,
+    width: f32,
+) {
+    egui::Frame::new()
+        .fill(theme::BG_CARD)
+        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+        .corner_radius(12)
+        .inner_margin(egui::Margin::same(12))
+        .show(ui, |ui| {
+            ui.set_width(width - 24.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 12.0;
+                cover(ui, game, entry, images, egui::vec2(52.0, 52.0));
+                let text_w = (width - 24.0 - 52.0 - 12.0 - 44.0).max(120.0);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(text_w, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.add(
+                            egui::Label::new(RichText::new(&entry.name).size(14.0).strong())
+                                .truncate(),
                         );
-                    }
-                    row.vertical(|details| {
-                        details.label(RichText::new(&entry.name).size(15.0).strong());
-                        details.label(widgets::muted(download_subtitle(entry, game), 11.0));
-                        details.label(
-                            RichText::new(format!(
-                                "Downloaded · {}",
-                                format_size(if entry.downloaded_size > 0 {
-                                    entry.downloaded_size
-                                } else {
-                                    entry.received
-                                })
-                            ))
-                            .size(11.0)
-                            .color(theme::GREEN),
+                        ui.add(
+                            egui::Label::new(widgets::muted(download_subtitle(entry, game), 11.0))
+                                .truncate(),
+                        );
+                        ui.label(
+                            RichText::new(format!("Downloaded · {}", downloaded_size(entry)))
+                                .size(11.0)
+                                .color(theme::GREEN),
                         );
                         match &entry.registration {
                             Some(Ok(())) => {
-                                details.label(
-                                    RichText::new("Registered with Windows")
+                                ui.label(
+                                    RichText::new("Registered in Windows")
                                         .size(11.0)
                                         .color(theme::GREEN),
                                 );
                             }
                             Some(Err(error)) => {
-                                details.label(
+                                ui.label(
                                     RichText::new(format!(
-                                        "Extracted; registration issue: {error}"
+                                        "Extracted; registration problem: {error}"
                                     ))
                                     .size(11.0)
                                     .color(Color32::from_rgb(248, 191, 90)),
@@ -367,87 +493,215 @@ fn completed_section(
                             }
                             None => {}
                         }
-                        if details.add(egui::Button::image_and_text(icons::folder_check(13.0), "Open folder")).clicked()
-                            && let Some(parent) = entry.path.parent()
-                        {
-                            open_folder(parent);
-                        }
-                    });
+                    },
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ghost(ui, icons::folder_check(15.0), "Open folder", theme::TEXT_MUTED)
+                        && let Some(parent) = entry.path.parent()
+                    {
+                        open_folder(parent);
+                    }
                 });
             });
         });
-        ui.add_space(8.0);
-    }
 }
 
-fn failed_section(ui: &mut egui::Ui, downloads: &DownloadManager) {
-    let failed: Vec<_> = downloads
-        .entries
+// ───────────────────────── Échecs ─────────────────────────
+
+fn failed_section(ui: &mut egui::Ui, entries: &[Download]) {
+    let failed: Vec<(&Download, &String)> = entries
         .iter()
-        .filter(|entry| matches!(entry.status, DownloadStatus::Failed(_)))
+        .rev()
+        .filter_map(|e| match &e.status {
+            DownloadStatus::Failed(error) => Some((e, error)),
+            _ => None,
+        })
         .collect();
     if failed.is_empty() {
         return;
     }
-    ui.add_space(16.0);
-    ui.label(
-        RichText::new(format!("Failed ({})", failed.len()))
-            .size(17.0)
-            .strong(),
-    );
-    ui.add_space(8.0);
-    for entry in failed.into_iter().rev() {
-        if let DownloadStatus::Failed(error) = &entry.status {
-            ui.winui(|ui| {
-                ui.card(&entry.name, "Download failed", |card| {
-                    card.label(RichText::new(error).color(Color32::from_rgb(248, 113, 113)));
-                });
+    section_title(ui, "Failed", failed.len(), theme::DANGER);
+
+    for (entry, error) in failed {
+        egui::Frame::new()
+            .fill(theme::BG_CARD)
+            .stroke(egui::Stroke::new(1.0, theme::DANGER_DARK))
+            .corner_radius(12)
+            .inner_margin(egui::Margin::symmetric(16, 12))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = 3.0;
+                ui.add(egui::Label::new(RichText::new(&entry.name).size(14.0).strong()).truncate());
+                ui.label(widgets::muted("Download failed", 11.0));
+                ui.label(RichText::new(error.as_str()).size(12.0).color(theme::DANGER));
             });
-            ui.add_space(8.0);
-        }
+        ui.add_space(10.0);
     }
 }
 
-fn cover(ui: &mut egui::Ui, game: &Game, images: &mut ImageCache, size: (f32, f32)) {
-    images.request(ui.ctx(), &game.id, &game.image, (120, 120));
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(size.0, size.1), egui::Sense::hover());
-    match images.get(&game.id) {
-        Some(texture) => images::paint_cover(ui, texture, rect, egui::CornerRadius::same(10), 1.0),
-        None => {
-            images::paint_placeholder(ui, rect, egui::CornerRadius::same(10), game.display_name())
-        }
+// ───────────────────────── Éléments communs ─────────────────────────
+
+fn section_title(ui: &mut egui::Ui, label: &str, count: usize, color: Color32) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.label(RichText::new(label.to_uppercase()).size(11.0).strong().color(color));
+        ui.label(widgets::muted(count.to_string(), 11.0));
+    });
+    ui.add_space(8.0);
+}
+
+fn empty_state(ui: &mut egui::Ui, filter: Filter, nothing_at_all: bool) {
+    ui.add_space(70.0);
+    ui.vertical_centered(|ui| {
+        let (title, text) = if nothing_at_all {
+            (
+                "No downloads",
+                "Downloads started from a game page will appear here.",
+            )
+        } else {
+            (
+                "Nothing to show",
+                match filter {
+                    Filter::Active => "No active transfers right now.",
+                    Filter::Done => "No completed games yet.",
+                    Filter::Failed => "No failures: everything went well.",
+                    Filter::All => "",
+                },
+            )
+        };
+        ui.label(
+            RichText::new(title)
+                .size(18.0)
+                .strong()
+                .color(theme::TEXT_TITLE),
+        );
+        ui.add_space(6.0);
+        ui.label(RichText::new(text).color(theme::TEXT_MUTED));
+    });
+}
+
+fn cover(
+    ui: &mut egui::Ui,
+    game: Option<&Game>,
+    entry: &Download,
+    images: &mut ImageCache,
+    size: egui::Vec2,
+) {
+    if let Some(game) = game {
+        images.request(ui.ctx(), &game.id, &game.image, (480, 270));
     }
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let radius = egui::CornerRadius::same(10);
+    match game.and_then(|game| images.get(&game.id)) {
+        Some(texture) => images::paint_cover(ui, texture, rect, radius, 1.0),
+        None => images::paint_placeholder(ui, rect, radius, &entry.name),
+    }
+}
+
+/// Barre de progression peinte à la main : fine, arrondie, couleur par statut.
+fn progress_bar(ui: &mut egui::Ui, width: f32, height: f32, fraction: f32, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    let painter = ui.painter();
+    let radius = height / 2.0;
+    painter.rect_filled(rect, radius, Color32::from_rgb(30, 35, 46));
+    let filled = egui::Rect::from_min_size(
+        rect.min,
+        egui::vec2(rect.width() * fraction.clamp(0.0, 1.0), rect.height()),
+    );
+    if filled.width() > 0.5 {
+        painter.rect_filled(filled, radius, color);
+    }
+}
+
+fn bar_color(entry: &Download) -> Color32 {
+    match entry.status {
+        DownloadStatus::Paused => theme::GOLD,
+        DownloadStatus::Extracting | DownloadStatus::Registering => theme::GREEN,
+        _ => theme::ACCENT_LIGHT,
+    }
+}
+
+fn find_game<'a>(catalog: &'a Catalog, epic: &'a Catalog, name: &str) -> Option<&'a Game> {
+    catalog
+        .games
+        .iter()
+        .chain(epic.games.iter())
+        .find(|game| game.name.eq_ignore_ascii_case(name))
 }
 
 fn download_subtitle(entry: &Download, game: Option<&Game>) -> String {
     let developer = game
         .map(|game| game.developer.as_str())
+        .filter(|v| !v.is_empty())
         .unwrap_or("Direct download");
     let path = if entry.registration.is_some() {
         entry.path.parent().unwrap_or(&entry.path)
     } else {
         &entry.path
     };
-    format!("{developer} · {}", path.display())
+    format!("{developer}  ·  {}", path.display())
+}
+
+fn downloaded_size(entry: &Download) -> String {
+    format_size(if entry.downloaded_size > 0 {
+        entry.downloaded_size
+    } else {
+        entry.received
+    })
+}
+
+/// Ligne de progression textuelle : octets, débit et temps restant.
+fn metrics(entry: &Download) -> String {
+    let mut parts = Vec::new();
+    // Extraction / vérification : `received` est un pourcentage (total = 100).
+    if entry.status == DownloadStatus::Extracting && entry.total == 100 {
+        parts.push(format!("{}%", entry.received));
+    } else if entry.total > 0 {
+        parts.push(format!(
+            "{} / {}",
+            format_size(entry.received),
+            format_size(entry.total)
+        ));
+    } else if entry.received > 0 {
+        parts.push(format_size(entry.received));
+    }
+    if entry.speed > 0 {
+        parts.push(format_speed(entry.speed));
+    }
+    if entry.total > entry.received && entry.speed > 0 {
+        parts.push(format!(
+            "{} left",
+            format_eta(entry.total - entry.received, entry.speed)
+        ));
+    }
+    parts.join("  ·  ")
+}
+
+/// Epic : barre unique, les 10 derniers % correspondent à la vérification des fichiers.
+fn is_verifying(entry: &Download) -> bool {
+    entry.status == DownloadStatus::Downloading
+        && entry.store() == GameStore::Epic
+        && entry.total > 0
+        && entry.received.saturating_mul(10) >= entry.total.saturating_mul(9)
 }
 
 fn status_text(status: &DownloadStatus) -> RichText {
     match status {
         DownloadStatus::Queued => widgets::muted("Waiting in queue", 11.0),
-        DownloadStatus::Downloading => RichText::new("Downloading in progress")
+        DownloadStatus::Downloading => RichText::new("Downloading")
             .color(theme::ACCENT_LIGHT)
             .strong(),
         DownloadStatus::Extracting => RichText::new("Extracting package")
             .color(theme::ACCENT_LIGHT)
             .strong(),
-        DownloadStatus::Registering => RichText::new("Registering game with Windows")
+        DownloadStatus::Registering => RichText::new("Registering in Windows")
             .color(theme::ACCENT_LIGHT)
             .strong(),
         DownloadStatus::Paused => RichText::new("Paused").color(theme::GOLD).strong(),
         DownloadStatus::Completed => RichText::new("Completed").color(theme::GREEN),
         DownloadStatus::Cancelled => widgets::muted("Cancelled", 11.0),
         DownloadStatus::Failed(error) => {
-            RichText::new(format!("Failed: {error}")).color(Color32::from_rgb(248, 113, 113))
+            RichText::new(format!("Failed: {error}")).color(theme::DANGER)
         }
     }
 }
@@ -476,6 +730,14 @@ fn format_eta(remaining: u64, bytes_per_second: u64) -> String {
     }
 }
 
+/// Le téléchargement occupe actuellement la file (les autres attendent ou sont en pause).
+fn is_running(status: &DownloadStatus) -> bool {
+    matches!(
+        status,
+        DownloadStatus::Downloading | DownloadStatus::Extracting | DownloadStatus::Registering
+    )
+}
+
 fn is_active(status: &DownloadStatus) -> bool {
     matches!(
         status,
@@ -485,11 +747,4 @@ fn is_active(status: &DownloadStatus) -> bool {
             | DownloadStatus::Extracting
             | DownloadStatus::Registering
     )
-}
-
-#[derive(Clone, Copy)]
-enum DownloadAction {
-    Pause,
-    Resume,
-    Cancel,
 }

@@ -58,7 +58,10 @@ pub fn fetch(name: &str) -> Result<Option<EpicStoreInfo>, String> {
             Err(error) => errors.push(error),
         }
     }
-    Err(format!("Epic Games store unreachable ({})", errors.join(" / ")))
+    Err(format!(
+        "Epic Games store unreachable ({})",
+        errors.join(" / ")
+    ))
 }
 
 fn send(request: reqwest::blocking::RequestBuilder) -> Result<Value, String> {

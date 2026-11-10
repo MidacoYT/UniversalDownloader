@@ -5,9 +5,10 @@ use crate::net;
 use eframe::egui::{self, Color32, CornerRadius, Rect, Vec2};
 use sha1::{Digest, Sha1};
 use std::{
+    cell::Cell,
+    collections::HashMap,
     fs,
     path::PathBuf,
-    collections::HashMap,
     sync::mpsc::{self, Receiver, Sender},
     sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
@@ -22,6 +23,22 @@ const WORKERS: usize = 6;
 /// Nouvelle tentative pour une jaquette en échec : 5 essais, une minute entre chacun.
 const MAX_ATTEMPTS: u32 = 5;
 const RETRY_DELAY: Duration = Duration::from_secs(60);
+
+/// Budget mémoire des jaquettes chargées (RGBA 8 bits). Au-delà, les textures inutilisées
+/// depuis un moment sont libérées : elles se rechargent depuis le cache disque si on y revient.
+/// Sans limite, parcourir tout le catalogue accumulait des milliers de textures.
+const TEXTURE_BUDGET: usize = 256 * 1024 * 1024;
+
+/// Une texture demandée il y a moins de ce nombre de frames n'est jamais évincée
+/// (évite de décharger ce qui est à l'écran et le clignotement qui s'ensuivrait).
+const KEEP_FRAMES: u64 = 120;
+
+/// Texture chargée + dernière frame où elle a été demandée (éviction LRU).
+struct CachedTexture {
+    texture: egui::TextureHandle,
+    last_used: Cell<u64>,
+    bytes: usize,
+}
 
 pub fn hero_key(game_id: &str) -> String {
     format!("hero:{game_id}")
@@ -49,7 +66,10 @@ pub struct ImageCache {
     jobs: Sender<Job>,
     pending: HashMap<String, Pending>,
     failed: HashMap<String, Failed>,
-    textures: HashMap<String, egui::TextureHandle>,
+    textures: HashMap<String, CachedTexture>,
+    texture_bytes: usize,
+    /// Compteur de frames (incrémenté dans `poll`) servant d'horloge à l'éviction.
+    frame: u64,
 }
 
 impl ImageCache {
@@ -78,11 +98,16 @@ impl ImageCache {
             pending: HashMap::new(),
             failed: HashMap::new(),
             textures: HashMap::new(),
+            texture_bytes: 0,
+            frame: 0,
         }
     }
 
     pub fn get(&self, key: &str) -> Option<&egui::TextureHandle> {
-        self.textures.get(key)
+        self.textures.get(key).map(|cached| {
+            cached.last_used.set(self.frame);
+            &cached.texture
+        })
     }
 
     /// Autorise une nouvelle tentative immédiate pour les images qui avaient échoué.
@@ -95,7 +120,14 @@ impl ImageCache {
         self.schedule(ctx, key, url, max, 0);
     }
 
-    fn schedule(&mut self, ctx: &egui::Context, key: &str, url: &str, max: (u32, u32), attempts: u32) {
+    fn schedule(
+        &mut self,
+        ctx: &egui::Context,
+        key: &str,
+        url: &str,
+        max: (u32, u32),
+        attempts: u32,
+    ) {
         if url.is_empty()
             || self.textures.contains_key(key)
             || self.failed.contains_key(key)
@@ -119,6 +151,7 @@ impl ImageCache {
     /// Intègre les images terminées, puis relance les échecs arrivés à échéance
     /// (à appeler une fois par frame).
     pub fn poll(&mut self, ctx: &egui::Context) {
+        self.frame = self.frame.wrapping_add(1);
         let mut changed = false;
         while let Ok((key, image)) = self.rx.try_recv() {
             let Some(pending) = self.pending.remove(&key) else {
@@ -126,12 +159,19 @@ impl ImageCache {
             };
             match image {
                 Some(image) => {
-                    let texture = ctx.load_texture(
-                        format!("img-{key}"),
-                        image,
-                        egui::TextureOptions::LINEAR,
-                    );
-                    self.textures.insert(key, texture);
+                    let texture =
+                        ctx.load_texture(format!("img-{key}"), image, egui::TextureOptions::LINEAR);
+                    let [width, height] = texture.size();
+                    let bytes = width * height * 4;
+                    self.texture_bytes += bytes;
+                    let cached = CachedTexture {
+                        texture,
+                        last_used: Cell::new(self.frame),
+                        bytes,
+                    };
+                    if let Some(old) = self.textures.insert(key, cached) {
+                        self.texture_bytes = self.texture_bytes.saturating_sub(old.bytes);
+                    }
                     changed = true;
                 }
                 None => {
@@ -163,8 +203,32 @@ impl ImageCache {
             self.failed.remove(&key);
             self.schedule(ctx, &key, &failed.url, failed.max, failed.attempts);
         }
+        if self.texture_bytes > TEXTURE_BUDGET {
+            self.evict_idle();
+        }
         if changed {
             ctx.request_repaint();
+        }
+    }
+
+    /// Libère les textures les moins récemment utilisées jusqu'à repasser à 75 % du budget.
+    fn evict_idle(&mut self) {
+        let frame = self.frame;
+        let mut idle: Vec<(u64, String)> = self
+            .textures
+            .iter()
+            .filter(|(_, cached)| cached.last_used.get().saturating_add(KEEP_FRAMES) < frame)
+            .map(|(key, cached)| (cached.last_used.get(), key.clone()))
+            .collect();
+        idle.sort_unstable();
+        let target = TEXTURE_BUDGET / 4 * 3;
+        for (_, key) in idle {
+            if self.texture_bytes <= target {
+                break;
+            }
+            if let Some(cached) = self.textures.remove(&key) {
+                self.texture_bytes = self.texture_bytes.saturating_sub(cached.bytes);
+            }
         }
     }
 }
@@ -180,10 +244,7 @@ fn covers_dir() -> Option<PathBuf> {
 /// Emplacement du fichier miniature en cache pour cette URL et taille cible.
 fn cached_path(url: &str, max: (u32, u32)) -> Option<PathBuf> {
     let digest = Sha1::digest(url.as_bytes());
-    Some(covers_dir()?.join(format!(
-        "{digest:x}-{}x{}.jpg",
-        max.0, max.1
-    )))
+    Some(covers_dir()?.join(format!("{digest:x}-{}x{}.jpg", max.0, max.1)))
 }
 
 fn to_color_image(image: &image::DynamicImage) -> egui::ColorImage {
@@ -212,7 +273,14 @@ fn load_image(url: &str, max: (u32, u32)) -> Option<egui::ColorImage> {
         .ok()?
         .bytes()
         .ok()?;
-    let thumbnail = image::load_from_memory(&bytes).ok()?.thumbnail(max.0, max.1);
+    // Les jaquettes sont opaques : on retire le canal alpha, sinon l'encodeur JPEG refuse
+    // les sources PNG/WebP RGBA et le cache disque n'était jamais écrit pour elles.
+    let thumbnail = image::DynamicImage::ImageRgb8(
+        image::load_from_memory(&bytes)
+            .ok()?
+            .thumbnail(max.0, max.1)
+            .to_rgb8(),
+    );
     if let Some(path) = cached_path(url, max) {
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);

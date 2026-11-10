@@ -18,7 +18,7 @@ pub fn show(ctx: &egui::Context, entry: &LibraryEntry, out: &mut Vec<Action>) {
         .show(ctx, |ui| {
             ui.label(format!("Uninstall {}?", entry.name));
             ui.add_space(6.0);
-            ui.label("This unregisters the game from Windows if needed, then permanently deletes its files:");
+            ui.label("The game will be removed from Windows if needed, then its files will be permanently deleted:");
             ui.add(
                 egui::Label::new(entry.path.display().to_string())
                     .wrap_mode(egui::TextWrapMode::Wrap),
