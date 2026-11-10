@@ -64,7 +64,10 @@ pub fn show(
                 out,
             );
             let new_games = top_k(
-                catalog.games.iter().filter(|game| !game.date_added.is_empty()),
+                catalog
+                    .games
+                    .iter()
+                    .filter(|game| !game.date_added.is_empty()),
                 12,
                 |a, b| b.date_added.cmp(&a.date_added),
             );
@@ -218,7 +221,11 @@ fn hero(
         painter.circle_filled(
             center,
             if active { 5.0 } else { 4.0 },
-            if active { theme::ACCENT } else { theme::BORDER_STRONG },
+            if active {
+                theme::ACCENT
+            } else {
+                theme::BORDER_STRONG
+            },
         );
         if response.clicked() {
             chosen = Some(dot);
@@ -233,7 +240,6 @@ fn hero(
 }
 
 // ───────────────────────── Rangées ─────────────────────────
-
 
 fn rail(
     ui: &mut egui::Ui,
@@ -265,16 +271,11 @@ fn rail(
         });
 
         if let Some(page) = see_all {
-            ui.with_layout(
-                egui::Layout::right_to_left(egui::Align::Center),
-                |ui| {
-                    if widgets::pill_button(
-                        ui, "See all", None, None, true,
-                    ).clicked() {
-                        out.push(Action::Navigate(page));
-                    }
-                },
-            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if widgets::pill_button(ui, "See all", None, None, true).clicked() {
+                    out.push(Action::Navigate(page));
+                }
+            });
         }
     });
 
@@ -295,12 +296,7 @@ fn rail(
                 ui.add_space(4.0);
 
                 for game in games {
-                    images.request(
-                        ui.ctx(),
-                        &game.id,
-                        &game.image,
-                        (480, 270),
-                    );
+                    images.request(ui.ctx(), &game.id, &game.image, (480, 270));
 
                     if card(ui, game, images.get(&game.id)) {
                         out.push(Action::OpenGame {
@@ -315,13 +311,12 @@ fn rail(
     ui.add_space(24.0);
 }
 
-
 /// Carte paysage : jaquette, titre et éditeur. Retourne `true` au clic.
 fn card(ui: &mut egui::Ui, game: &Game, texture: Option<&egui::TextureHandle>) -> bool {
     let (rect, response) = ui.allocate_exact_size(CARD_SIZE, egui::Sense::click());
-    let hover = ui
-        .ctx()
-        .animate_bool_with_time(response.id.with("card-hover"), response.hovered(), 0.14);
+    let hover =
+        ui.ctx()
+            .animate_bool_with_time(response.id.with("card-hover"), response.hovered(), 0.14);
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -329,7 +324,12 @@ fn card(ui: &mut egui::Ui, game: &Game, texture: Option<&egui::TextureHandle>) -
     painter.rect_filled(rect, 6.0, theme::mix((22, 26, 34), (30, 35, 46), hover));
 
     let art = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), CARD_ART_HEIGHT));
-    let radius = egui::CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 };
+    let radius = egui::CornerRadius {
+        nw: 6,
+        ne: 6,
+        sw: 0,
+        se: 0,
+    };
     match texture {
         Some(texture) => images::paint_cover(ui, texture, art, radius, 1.0 + 0.04 * hover),
         None => images::paint_placeholder(ui, art, radius, game.display_name()),
@@ -337,7 +337,11 @@ fn card(ui: &mut egui::Ui, game: &Game, texture: Option<&egui::TextureHandle>) -
 
     let (store_label, store_color) = store_style(game.store);
     let label_width = painter
-        .layout_no_wrap(store_label.to_owned(), egui::FontId::proportional(9.5), store_color)
+        .layout_no_wrap(
+            store_label.to_owned(),
+            egui::FontId::proportional(9.5),
+            store_color,
+        )
         .size()
         .x;
     let badge = egui::Rect::from_min_size(
@@ -420,7 +424,11 @@ fn stats_strip(ui: &mut egui::Ui, catalog: &Catalog, epic_catalog: &Catalog, lib
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                stat(ui, "Games available", (catalog.games.len() + epic_catalog.games.len()).to_string());
+                stat(
+                    ui,
+                    "Games available",
+                    (catalog.games.len() + epic_catalog.games.len()).to_string(),
+                );
                 ui.add_space(48.0);
                 stat(ui, "Games installed", library.entries.len().to_string());
                 ui.add_space(48.0);
@@ -432,7 +440,12 @@ fn stats_strip(ui: &mut egui::Ui, catalog: &Catalog, epic_catalog: &Catalog, lib
 fn stat(ui: &mut egui::Ui, label: &str, value: String) {
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
-        ui.label(RichText::new(value).size(18.0).strong().color(theme::TEXT_TITLE));
+        ui.label(
+            RichText::new(value)
+                .size(18.0)
+                .strong()
+                .color(theme::TEXT_TITLE),
+        );
         ui.label(widgets::muted(label, 11.0));
     });
 }
@@ -447,7 +460,12 @@ fn store_style(store: GameStore) -> (&'static str, Color32) {
 /// Dégradé à quatre coins [haut-gauche, haut-droit, bas-droit, bas-gauche], peint en maillage.
 fn gradient(painter: &egui::Painter, rect: egui::Rect, corners: [Color32; 4]) {
     let mut mesh = Mesh::default();
-    let points = [rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom()];
+    let points = [
+        rect.left_top(),
+        rect.right_top(),
+        rect.right_bottom(),
+        rect.left_bottom(),
+    ];
     for (pos, color) in points.into_iter().zip(corners) {
         mesh.vertices.push(Vertex {
             pos,

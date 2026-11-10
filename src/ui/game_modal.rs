@@ -165,7 +165,12 @@ fn hero(
         egui::vec2(ui.available_width(), HERO_HEIGHT),
         egui::Sense::hover(),
     );
-    let radius = egui::CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 };
+    let radius = egui::CornerRadius {
+        nw: 8,
+        ne: 8,
+        sw: 0,
+        se: 0,
+    };
     let painter = ui.painter().clone();
     painter.rect_filled(rect, radius, theme::BG_CARD);
     if let Some(texture) = texture {
@@ -177,7 +182,10 @@ fn hero(
     let clear = Color32::from_rgba_unmultiplied(app.r(), app.g(), app.b(), 0);
     let solid = Color32::from_rgba_unmultiplied(app.r(), app.g(), app.b(), 255);
     let shade = Color32::from_rgba_unmultiplied(app.r(), app.g(), app.b(), 190);
-    let bottom = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.top() + rect.height() * 0.25), rect.max);
+    let bottom = egui::Rect::from_min_max(
+        egui::pos2(rect.left(), rect.top() + rect.height() * 0.25),
+        rect.max,
+    );
     gradient(&painter, bottom, [clear, clear, solid, solid]);
     gradient(&painter, rect, [shade, clear, clear, shade]);
 
@@ -232,14 +240,18 @@ fn hero(
     }
     match game.store {
         GameStore::Xbox => {
-            let secondary = egui::Button::new(RichText::new("Open in Xbox").color(theme::TEXT_TITLE))
-                .fill(Color32::from_rgba_unmultiplied(0, 0, 0, 0))
-                .stroke(egui::Stroke::new(1.0, theme::BORDER_STRONG))
-                .corner_radius(6.0)
-                .min_size(egui::vec2(170.0, 36.0));
+            let secondary =
+                egui::Button::new(RichText::new("Open in Xbox").color(theme::TEXT_TITLE))
+                    .fill(Color32::from_rgba_unmultiplied(0, 0, 0, 0))
+                    .stroke(egui::Stroke::new(1.0, theme::BORDER_STRONG))
+                    .corner_radius(6.0)
+                    .min_size(egui::vec2(170.0, 36.0));
             if ui
                 .put(
-                    egui::Rect::from_min_size(egui::pos2(left + 182.0, button_y), egui::vec2(170.0, 36.0)),
+                    egui::Rect::from_min_size(
+                        egui::pos2(left + 182.0, button_y),
+                        egui::vec2(170.0, 36.0),
+                    ),
                     secondary,
                 )
                 .clicked()
@@ -255,14 +267,18 @@ fn hero(
                 game.store_url.as_str()
             };
             if !info_url.is_empty() {
-                let secondary = egui::Button::new(RichText::new("More info").color(theme::TEXT_TITLE))
-                    .fill(Color32::from_rgba_unmultiplied(0, 0, 0, 0))
-                    .stroke(egui::Stroke::new(1.0, theme::BORDER_STRONG))
-                    .corner_radius(6.0)
-                    .min_size(egui::vec2(170.0, 36.0));
+                let secondary =
+                    egui::Button::new(RichText::new("More info").color(theme::TEXT_TITLE))
+                        .fill(Color32::from_rgba_unmultiplied(0, 0, 0, 0))
+                        .stroke(egui::Stroke::new(1.0, theme::BORDER_STRONG))
+                        .corner_radius(6.0)
+                        .min_size(egui::vec2(170.0, 36.0));
                 if ui
                     .put(
-                        egui::Rect::from_min_size(egui::pos2(left + 182.0, button_y), egui::vec2(170.0, 36.0)),
+                        egui::Rect::from_min_size(
+                            egui::pos2(left + 182.0, button_y),
+                            egui::vec2(170.0, 36.0),
+                        ),
                         secondary,
                     )
                     .clicked()
@@ -278,7 +294,11 @@ fn hero(
         rect.right_top() + egui::vec2(-48.0, 14.0),
         egui::vec2(34.0, 34.0),
     );
-    let response = ui.interact(close_rect, ui.id().with("modal_close"), egui::Sense::click());
+    let response = ui.interact(
+        close_rect,
+        ui.id().with("modal_close"),
+        egui::Sense::click(),
+    );
     painter.circle_filled(
         close_rect.center(),
         17.0,
@@ -430,8 +450,14 @@ fn side_column(ui: &mut egui::Ui, game: &Game) {
 
 fn heading(ui: &mut egui::Ui, text: &str) {
     ui.add_space(20.0);
-    ui.label(RichText::new(text).size(16.0).strong().color(theme::TEXT_TITLE));
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+    ui.label(
+        RichText::new(text)
+            .size(16.0)
+            .strong()
+            .color(theme::TEXT_TITLE),
+    );
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
     ui.painter().rect_filled(rect, 0.0, theme::BORDER);
     ui.add_space(12.0);
 }
@@ -460,9 +486,7 @@ fn stats_strip(ui: &mut egui::Ui, game: &Game) {
     let reviews = match game.store {
         GameStore::Epic => match game.critic_score {
             Some(score) => format!("OpenCritic {score}/100"),
-            None if game.epic_stats_requested && !game.epic_stats_loaded => {
-                "Loading…".into()
-            }
+            None if game.epic_stats_requested && !game.epic_stats_loaded => "Loading…".into(),
             None => "No rating".into(),
         },
         GameStore::Xbox if game.rating_count == 0 => "New".to_owned(),
@@ -496,15 +520,27 @@ fn stats_strip(ui: &mut egui::Ui, game: &Game) {
 
 fn info_rows(game: &Game) -> Vec<(String, String)> {
     let mut rows = vec![
-        ("Publisher".to_owned(), or_fallback(&game.publisher, "—").to_owned()),
-        ("Developer".to_owned(), or_fallback(&game.developer, "—").to_owned()),
-        ("Release date".to_owned(), or_fallback(&game.release, "—").to_owned()),
+        (
+            "Publisher".to_owned(),
+            or_fallback(&game.publisher, "—").to_owned(),
+        ),
+        (
+            "Developer".to_owned(),
+            or_fallback(&game.developer, "—").to_owned(),
+        ),
+        (
+            "Release date".to_owned(),
+            or_fallback(&game.release, "—").to_owned(),
+        ),
     ];
     if !game.platform.is_empty() {
         rows.push(("Platforms".to_owned(), game.platform.clone()));
     }
     if let Some(percent) = game.critic_recommend {
-        rows.push(("Critic reviews".to_owned(), format!("OpenCritic recommends · {percent}%")));
+        rows.push((
+            "Critic reviews".to_owned(),
+            format!("OpenCritic recommends · {percent}%"),
+        ));
     }
     rows
 }
@@ -521,7 +557,10 @@ fn info_card(ui: &mut egui::Ui, rows: &[(String, String)]) {
             for (index, (label, value)) in rows.iter().enumerate() {
                 if index > 0 {
                     ui.add_space(10.0);
-                    let (line, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+                    let (line, _) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), 1.0),
+                        egui::Sense::hover(),
+                    );
                     ui.painter().rect_filled(line, 0.0, theme::BORDER);
                     ui.add_space(10.0);
                 }
@@ -549,10 +588,16 @@ fn links(ui: &mut egui::Ui, game: &Game) {
             ui.hyperlink_to("Support", &game.support_uri);
         }
         if !game.language.is_empty() {
-            ui.label(widgets::muted(format!("Language: {}", game.language.to_uppercase()), 11.0));
+            ui.label(widgets::muted(
+                format!("Language: {}", game.language.to_uppercase()),
+                11.0,
+            ));
         }
         if !game.last_modified.is_empty() {
-            ui.label(widgets::muted(format!("Updated: {}", game.last_modified), 11.0));
+            ui.label(widgets::muted(
+                format!("Updated: {}", game.last_modified),
+                11.0,
+            ));
         }
     });
 }
@@ -563,14 +608,10 @@ fn genres(ui: &mut egui::Ui, game: &Game) {
     }
     ui.add_space(14.0);
     // Texte simple qui passe à la ligne : pas de chips étroits, donc pas de découpage par lettre.
-    ui.add(
-        egui::Label::new(widgets::muted(game.genres.join("  ·  "), 11.5))
-            .wrap(),
-    );
+    ui.add(egui::Label::new(widgets::muted(game.genres.join("  ·  "), 11.5)).wrap());
 }
 
 // ───────────────────────── Carrousel ─────────────────────────
-
 
 fn carousel(
     ui: &mut egui::Ui,
@@ -852,13 +893,17 @@ fn feature_box(ui: &mut egui::Ui, group: FeatureGroup, entries: &[&GameAttribute
         });
 }
 
-
 // ───────────────────────── Gradient ─────────────────────────
 
 /// Dégradé à quatre coins [haut-gauche, haut-droit, bas-droit, bas-gauche], peint en maillage.
 fn gradient(painter: &egui::Painter, rect: egui::Rect, corners: [Color32; 4]) {
     let mut mesh = Mesh::default();
-    let points = [rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom()];
+    let points = [
+        rect.left_top(),
+        rect.right_top(),
+        rect.right_bottom(),
+        rect.left_bottom(),
+    ];
     for (pos, color) in points.into_iter().zip(corners) {
         mesh.vertices.push(Vertex {
             pos,

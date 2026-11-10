@@ -102,7 +102,8 @@ fn store_selector(ui: &mut egui::Ui, selected: CatalogSelection, out: &mut Vec<A
         store_tab(ui, CatalogSelection::Epic, selected, out);
     });
     // Filet de séparation sous les onglets.
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
     ui.painter().rect_filled(rect, 0, super::theme::BORDER);
     ui.add_space(14.0);
 }
@@ -121,16 +122,14 @@ fn store_tab(
     };
     let is_selected = store == selected;
     let font = egui::FontId::proportional(13.0);
-    let galley = ui.painter().layout_no_wrap(
-        title.to_owned(),
-        font.clone(),
-        super::theme::TEXT_TITLE,
-    );
+    let galley =
+        ui.painter()
+            .layout_no_wrap(title.to_owned(), font.clone(), super::theme::TEXT_TITLE);
     let width = galley.size().x + 52.0;
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 42.0), egui::Sense::click());
-    let hover = ui
-        .ctx()
-        .animate_bool_with_time(response.id.with("tab-hover"), response.hovered(), 0.12);
+    let hover =
+        ui.ctx()
+            .animate_bool_with_time(response.id.with("tab-hover"), response.hovered(), 0.12);
     let active = ui
         .ctx()
         .animate_bool_with_time(response.id.with("tab-active"), is_selected, 0.2);
@@ -178,7 +177,8 @@ fn toolbar(
 ) {
     ui.horizontal(|ui| {
         ui.add(
-            FluentTextEdit::new(&mut catalog.search).hint_text("Search a title, publisher or genre"),
+            FluentTextEdit::new(&mut catalog.search)
+                .hint_text("Search a title, publisher or genre"),
         );
         widgets::combo(
             ui,

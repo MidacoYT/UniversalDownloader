@@ -82,21 +82,18 @@ pub fn show(
                                 .truncate(),
                             );
                         });
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Min),
-                            |ui| {
-                                let close = egui::Button::new(
-                                    RichText::new("×").size(16.0).color(theme::TEXT_MUTED),
-                                )
-                                .min_size(egui::vec2(32.0, 32.0))
-                                .fill(Color32::TRANSPARENT)
-                                .stroke(egui::Stroke::NONE)
-                                .corner_radius(8);
-                                if ui.add(close).on_hover_text("Close").clicked() {
-                                    dismiss = true;
-                                }
-                            },
-                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                            let close = egui::Button::new(
+                                RichText::new("×").size(16.0).color(theme::TEXT_MUTED),
+                            )
+                            .min_size(egui::vec2(32.0, 32.0))
+                            .fill(Color32::TRANSPARENT)
+                            .stroke(egui::Stroke::NONE)
+                            .corner_radius(8);
+                            if ui.add(close).on_hover_text("Close").clicked() {
+                                dismiss = true;
+                            }
+                        });
                     });
                     ui.add_space(12.0);
 
@@ -111,7 +108,12 @@ pub fn show(
                         .corner_radius(6)
                         .inner_margin(egui::Margin::symmetric(10, 4))
                         .show(ui, |ui| {
-                            ui.label(RichText::new(store_label).size(10.5).strong().color(store_color));
+                            ui.label(
+                                RichText::new(store_label)
+                                    .size(10.5)
+                                    .strong()
+                                    .color(store_color),
+                            );
                         });
                     ui.add_space(20.0);
 
@@ -182,7 +184,9 @@ pub fn show(
                     // What happens next, depending on the store.
                     let note = match store {
                         GameStore::Xbox => "The Xbox package will be downloaded into this folder.",
-                        GameStore::Epic => "The Epic game files will be installed into this folder.",
+                        GameStore::Epic => {
+                            "The Epic game files will be installed into this folder."
+                        }
                     };
                     egui::Frame::new()
                         .fill(theme::BG_APP)
@@ -208,13 +212,12 @@ pub fn show(
                         if ui.add_enabled(valid, download).clicked() {
                             confirm = true;
                         }
-                        let cancel = egui::Button::new(
-                            RichText::new("Cancel").color(theme::TEXT_TITLE),
-                        )
-                        .fill(theme::BG_CARD_HOVER)
-                        .stroke(egui::Stroke::new(1.0, theme::BORDER_STRONG))
-                        .corner_radius(8)
-                        .min_size(egui::vec2(104.0, 38.0));
+                        let cancel =
+                            egui::Button::new(RichText::new("Cancel").color(theme::TEXT_TITLE))
+                                .fill(theme::BG_CARD_HOVER)
+                                .stroke(egui::Stroke::new(1.0, theme::BORDER_STRONG))
+                                .corner_radius(8)
+                                .min_size(egui::vec2(104.0, 38.0));
                         if ui.add(cancel).clicked() {
                             dismiss = true;
                         }
@@ -223,9 +226,7 @@ pub fn show(
         });
 
     if confirm {
-        out.push(crate::ui::Action::ConfirmDownload {
-            directory: trimmed,
-        });
+        out.push(crate::ui::Action::ConfirmDownload { directory: trimmed });
     } else if dismiss {
         out.push(crate::ui::Action::DismissDownload);
     }

@@ -80,7 +80,14 @@ pub fn show(
                 empty_state(ui, filter, downloads.entries.is_empty());
             }
             if matches!(filter, Filter::All | Filter::Active) {
-                active_section(ui, catalog, epic_catalog, images, &downloads.entries, &mut actions);
+                active_section(
+                    ui,
+                    catalog,
+                    epic_catalog,
+                    images,
+                    &downloads.entries,
+                    &mut actions,
+                );
             }
             if matches!(filter, Filter::All | Filter::Done) {
                 done_section(ui, catalog, epic_catalog, images, &downloads.entries);
@@ -162,9 +169,21 @@ fn stats(ui: &mut egui::Ui, entries: &[Download]) {
     };
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = gap;
-        stat_tile(ui, width, "ACTIVE", &counts.active.to_string(), "active transfers");
+        stat_tile(
+            ui,
+            width,
+            "ACTIVE",
+            &counts.active.to_string(),
+            "active transfers",
+        );
         stat_tile(ui, width, "SPEED", &speed, "total speed");
-        stat_tile(ui, width, "COMPLETED", &counts.done.to_string(), "games downloaded");
+        stat_tile(
+            ui,
+            width,
+            "COMPLETED",
+            &counts.done.to_string(),
+            "games downloaded",
+        );
         stat_tile(ui, width, "FAILED", &counts.failed.to_string(), "to retry");
     });
 }
@@ -184,8 +203,13 @@ fn stat_tile(ui: &mut egui::Ui, width: f32, caption: &str, value: &str, hint: &s
                     .color(theme::ACCENT_LIGHT),
             );
             ui.add(
-                egui::Label::new(RichText::new(value).size(20.0).strong().color(theme::TEXT_TITLE))
-                    .truncate(),
+                egui::Label::new(
+                    RichText::new(value)
+                        .size(20.0)
+                        .strong()
+                        .color(theme::TEXT_TITLE),
+                )
+                .truncate(),
             );
             ui.add(
                 egui::Label::new(RichText::new(hint).size(11.0).color(theme::TEXT_SUBTLE))
@@ -223,9 +247,9 @@ fn segment(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    let hover = ui
-        .ctx()
-        .animate_bool_with_time(response.id.with("segment-hover"), response.hovered(), 0.1);
+    let hover =
+        ui.ctx()
+            .animate_bool_with_time(response.id.with("segment-hover"), response.hovered(), 0.1);
     let fill = if selected {
         theme::ACCENT
     } else {
@@ -414,8 +438,8 @@ fn done_section(
     section_title(ui, "Completed", done.len(), theme::GREEN);
 
     let available = ui.available_width();
-    let columns = (((available + GRID_GAP) / (DONE_MIN_WIDTH + GRID_GAP)).floor() as usize)
-        .clamp(1, 3);
+    let columns =
+        (((available + GRID_GAP) / (DONE_MIN_WIDTH + GRID_GAP)).floor() as usize).clamp(1, 3);
     let width = ((available - GRID_GAP * (columns - 1) as f32) / columns as f32).floor();
 
     for chunk in done.chunks(columns) {
@@ -496,8 +520,12 @@ fn done_card(
                     },
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ghost(ui, icons::folder_check(15.0), "Open folder", theme::TEXT_MUTED)
-                        && let Some(parent) = entry.path.parent()
+                    if ghost(
+                        ui,
+                        icons::folder_check(15.0),
+                        "Open folder",
+                        theme::TEXT_MUTED,
+                    ) && let Some(parent) = entry.path.parent()
                     {
                         open_folder(parent);
                     }
@@ -533,7 +561,11 @@ fn failed_section(ui: &mut egui::Ui, entries: &[Download]) {
                 ui.spacing_mut().item_spacing.y = 3.0;
                 ui.add(egui::Label::new(RichText::new(&entry.name).size(14.0).strong()).truncate());
                 ui.label(widgets::muted("Download failed", 11.0));
-                ui.label(RichText::new(error.as_str()).size(12.0).color(theme::DANGER));
+                ui.label(
+                    RichText::new(error.as_str())
+                        .size(12.0)
+                        .color(theme::DANGER),
+                );
             });
         ui.add_space(10.0);
     }
@@ -544,7 +576,12 @@ fn failed_section(ui: &mut egui::Ui, entries: &[Download]) {
 fn section_title(ui: &mut egui::Ui, label: &str, count: usize, color: Color32) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
-        ui.label(RichText::new(label.to_uppercase()).size(11.0).strong().color(color));
+        ui.label(
+            RichText::new(label.to_uppercase())
+                .size(11.0)
+                .strong()
+                .color(color),
+        );
         ui.label(widgets::muted(count.to_string(), 11.0));
     });
     ui.add_space(8.0);

@@ -66,10 +66,14 @@ pub fn caption_buttons(ui: &mut egui::Ui, bar: Rect) -> f32 {
         );
         left = rect.left();
 
-        let response = ui.interact(rect, ui.id().with(("caption", caption as u8)), Sense::click());
-        let hover = ui
-            .ctx()
-            .animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.1);
+        let response = ui.interact(
+            rect,
+            ui.id().with(("caption", caption as u8)),
+            Sense::click(),
+        );
+        let hover =
+            ui.ctx()
+                .animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.1);
 
         let painter = ui.painter();
         let (fill, glyph) = if caption == Caption::Close {
@@ -84,7 +88,13 @@ pub fn caption_buttons(ui: &mut egui::Ui, bar: Rect) -> f32 {
             )
         };
         painter.rect_filled(rect, 0.0, fill);
-        paint_glyph(painter, caption, maximized, rect.center(), Stroke::new(1.0, glyph));
+        paint_glyph(
+            painter,
+            caption,
+            maximized,
+            rect.center(),
+            Stroke::new(1.0, glyph),
+        );
 
         if response.clicked() {
             let ctx = ui.ctx();
@@ -98,13 +108,22 @@ pub fn caption_buttons(ui: &mut egui::Ui, bar: Rect) -> f32 {
     left
 }
 
-fn paint_glyph(painter: &egui::Painter, caption: Caption, maximized: bool, center: Pos2, stroke: Stroke) {
+fn paint_glyph(
+    painter: &egui::Painter,
+    caption: Caption,
+    maximized: bool,
+    center: Pos2,
+    stroke: Stroke,
+) {
     // Centre aligné sur un demi-pixel logique pour des traits nets.
     let c = Pos2::new(center.x.floor() + 0.5, center.y.floor() + 0.5);
     let half = GLYPH / 2.0;
     match caption {
         Caption::Minimize => {
-            painter.line_segment([Pos2::new(c.x - half, c.y), Pos2::new(c.x + half, c.y)], stroke);
+            painter.line_segment(
+                [Pos2::new(c.x - half, c.y), Pos2::new(c.x + half, c.y)],
+                stroke,
+            );
         }
         Caption::Maximize if !maximized => {
             painter.rect_stroke(
@@ -118,7 +137,8 @@ fn paint_glyph(painter: &egui::Painter, caption: Caption, maximized: bool, cente
             // Deux fenêtres superposées : celle de devant en entier, celle de derrière
             // réduite à ses deux arêtes visibles.
             let side = GLYPH - 2.0;
-            let front = Rect::from_min_size(Pos2::new(c.x - half, c.y - half + 2.0), vec2(side, side));
+            let front =
+                Rect::from_min_size(Pos2::new(c.x - half, c.y - half + 2.0), vec2(side, side));
             let back = Rect::from_min_size(front.min + vec2(2.0, -2.0), vec2(side, side));
             painter.rect_stroke(front, 1.0, stroke, StrokeKind::Inside);
             painter.add(Shape::line(
@@ -133,8 +153,20 @@ fn paint_glyph(painter: &egui::Painter, caption: Caption, maximized: bool, cente
             ));
         }
         Caption::Close => {
-            painter.line_segment([Pos2::new(c.x - half, c.y - half), Pos2::new(c.x + half, c.y + half)], stroke);
-            painter.line_segment([Pos2::new(c.x - half, c.y + half), Pos2::new(c.x + half, c.y - half)], stroke);
+            painter.line_segment(
+                [
+                    Pos2::new(c.x - half, c.y - half),
+                    Pos2::new(c.x + half, c.y + half),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(c.x - half, c.y + half),
+                    Pos2::new(c.x + half, c.y - half),
+                ],
+                stroke,
+            );
         }
     }
 }
@@ -148,18 +180,52 @@ pub fn resize_edges(ui: &egui::Ui, area: Rect) {
     }
     let (e, c) = (RESIZE_EDGE, RESIZE_CORNER);
     let (l, r, t, b) = (area.left(), area.right(), area.top(), area.bottom());
-    let rect = |x0: f32, y0: f32, x1: f32, y1: f32| Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1));
+    let rect = |x0: f32, y0: f32, x1: f32, y1: f32| {
+        Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1))
+    };
 
     // Les coins sont déclarés après les bords : ils gagnent à l'intersection.
     let zones = [
-        (rect(l + c, t, r - c, t + e), ResizeDirection::North, CursorIcon::ResizeVertical),
-        (rect(l + c, b - e, r - c, b), ResizeDirection::South, CursorIcon::ResizeVertical),
-        (rect(l, t + c, l + e, b - c), ResizeDirection::West, CursorIcon::ResizeHorizontal),
-        (rect(r - e, t + c, r, b - c), ResizeDirection::East, CursorIcon::ResizeHorizontal),
-        (rect(l, t, l + c, t + c), ResizeDirection::NorthWest, CursorIcon::ResizeNwSe),
-        (rect(r - c, t, r, t + c), ResizeDirection::NorthEast, CursorIcon::ResizeNeSw),
-        (rect(l, b - c, l + c, b), ResizeDirection::SouthWest, CursorIcon::ResizeNeSw),
-        (rect(r - c, b - c, r, b), ResizeDirection::SouthEast, CursorIcon::ResizeNwSe),
+        (
+            rect(l + c, t, r - c, t + e),
+            ResizeDirection::North,
+            CursorIcon::ResizeVertical,
+        ),
+        (
+            rect(l + c, b - e, r - c, b),
+            ResizeDirection::South,
+            CursorIcon::ResizeVertical,
+        ),
+        (
+            rect(l, t + c, l + e, b - c),
+            ResizeDirection::West,
+            CursorIcon::ResizeHorizontal,
+        ),
+        (
+            rect(r - e, t + c, r, b - c),
+            ResizeDirection::East,
+            CursorIcon::ResizeHorizontal,
+        ),
+        (
+            rect(l, t, l + c, t + c),
+            ResizeDirection::NorthWest,
+            CursorIcon::ResizeNwSe,
+        ),
+        (
+            rect(r - c, t, r, t + c),
+            ResizeDirection::NorthEast,
+            CursorIcon::ResizeNeSw,
+        ),
+        (
+            rect(l, b - c, l + c, b),
+            ResizeDirection::SouthWest,
+            CursorIcon::ResizeNeSw,
+        ),
+        (
+            rect(r - c, b - c, r, b),
+            ResizeDirection::SouthEast,
+            CursorIcon::ResizeNwSe,
+        ),
     ];
     for (index, (zone, direction, cursor)) in zones.into_iter().enumerate() {
         let response = ui.interact(zone, ui.id().with(("window-resize", index)), Sense::drag());
@@ -178,5 +244,10 @@ pub fn paint_border(ctx: &egui::Context, area: Rect) {
         return;
     }
     ctx.layer_painter(LayerId::new(Order::Foreground, Id::new("window-border")))
-        .rect_stroke(area, 0.0, Stroke::new(1.0, theme::BORDER), StrokeKind::Inside);
+        .rect_stroke(
+            area,
+            0.0,
+            Stroke::new(1.0, theme::BORDER),
+            StrokeKind::Inside,
+        );
 }

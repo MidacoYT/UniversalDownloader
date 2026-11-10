@@ -171,8 +171,13 @@ fn stat_tile(ui: &mut egui::Ui, width: f32, caption: &str, value: &str, hint: &s
                     .color(theme::ACCENT_LIGHT),
             );
             ui.add(
-                egui::Label::new(RichText::new(value).size(22.0).strong().color(theme::TEXT_TITLE))
-                    .truncate(),
+                egui::Label::new(
+                    RichText::new(value)
+                        .size(22.0)
+                        .strong()
+                        .color(theme::TEXT_TITLE),
+                )
+                .truncate(),
             );
             ui.add(
                 egui::Label::new(RichText::new(hint).size(11.0).color(theme::TEXT_SUBTLE))
@@ -254,9 +259,9 @@ fn segment(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    let hover = ui
-        .ctx()
-        .animate_bool_with_time(response.id.with("segment-hover"), response.hovered(), 0.1);
+    let hover =
+        ui.ctx()
+            .animate_bool_with_time(response.id.with("segment-hover"), response.hovered(), 0.1);
     let fill = if selected {
         theme::ACCENT
     } else {
@@ -324,9 +329,9 @@ fn tile(ui: &mut egui::Ui, row: &LibraryRow, images: &mut ImageCache, out: &mut 
     let width = ui.available_width();
     let height = width * TILE_ASPECT;
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
-    let hover = ui
-        .ctx()
-        .animate_bool_with_time(response.id.with("tile-hover"), response.hovered(), 0.18);
+    let hover =
+        ui.ctx()
+            .animate_bool_with_time(response.id.with("tile-hover"), response.hovered(), 0.18);
     let radius = egui::CornerRadius::same(TILE_RADIUS);
     let painter = ui.painter().clone();
 
@@ -484,26 +489,18 @@ fn table(ui: &mut egui::Ui, rows: &[LibraryRow], images: &mut ImageCache, out: &
                         let (thumb, _) = ui.allocate_exact_size(TABLE_THUMB, egui::Sense::hover());
                         let radius = egui::CornerRadius::same(4);
                         match row.game.and_then(|game| images.get(&game.id)) {
-                            Some(texture) => {
-                                images::paint_cover(ui, texture, thumb, radius, 1.0)
-                            }
+                            Some(texture) => images::paint_cover(ui, texture, thumb, radius, 1.0),
                             None => images::paint_placeholder(ui, thumb, radius, row.title()),
                         }
                         ui.add_space(12.0);
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 1.0;
                             ui.add(
-                                egui::Label::new(
-                                    RichText::new(row.title()).size(14.0).strong(),
-                                )
-                                .truncate(),
+                                egui::Label::new(RichText::new(row.title()).size(14.0).strong())
+                                    .truncate(),
                             );
                             ui.add(
-                                egui::Label::new(widgets::muted(
-                                    store_name(row),
-                                    11.0,
-                                ))
-                                .truncate(),
+                                egui::Label::new(widgets::muted(store_name(row), 11.0)).truncate(),
                             );
                         });
                     });
@@ -539,12 +536,7 @@ fn table(ui: &mut egui::Ui, rows: &[LibraryRow], images: &mut ImageCache, out: &
 }
 
 /// Cellule de largeur fixe pour aligner les colonnes du tableau.
-fn cell(
-    ui: &mut egui::Ui,
-    width: f32,
-    height: f32,
-    add: impl FnOnce(&mut egui::Ui),
-) {
+fn cell(ui: &mut egui::Ui, width: f32, height: f32, add: impl FnOnce(&mut egui::Ui)) {
     ui.allocate_ui_with_layout(
         egui::vec2(width, height),
         egui::Layout::left_to_right(egui::Align::Center),
@@ -626,7 +618,11 @@ fn menu_items(ui: &mut egui::Ui, row: &LibraryRow, out: &mut Vec<Action>) {
 
 fn meta_line(row: &LibraryRow) -> String {
     let size = format!("{:.1} GB", row.entry.bytes as f64 / GIB);
-    match row.game.map(|game| game.publisher.as_str()).filter(|v| !v.is_empty()) {
+    match row
+        .game
+        .map(|game| game.publisher.as_str())
+        .filter(|v| !v.is_empty())
+    {
         Some(publisher) => format!("{publisher}  ·  {size}"),
         None => format!("Installed game  ·  {size}"),
     }

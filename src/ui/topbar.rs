@@ -99,16 +99,19 @@ fn navigation(ui: &mut egui::Ui, bar: Rect, mut x: f32, current: Page, out: &mut
 
         let response = ui.interact(item, ui.id().with(("topnav", index)), Sense::click());
         let hover = hover_amount(ui, &response);
-        let active = ui
-            .ctx()
-            .animate_bool_with_time(response.id.with("active"), current == page, 0.2);
+        let active =
+            ui.ctx()
+                .animate_bool_with_time(response.id.with("active"), current == page, 0.2);
         if response.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
 
         let painter = ui.painter();
         painter.galley(
-            Pos2::new(x + NAV_ITEM_PADDING, item.center().y - galley.size().y / 2.0),
+            Pos2::new(
+                x + NAV_ITEM_PADDING,
+                item.center().y - galley.size().y / 2.0,
+            ),
             galley,
             theme::mix((138, 146, 160), (245, 247, 250), hover.max(active)),
         );
@@ -167,7 +170,10 @@ fn download_pill(
     out: &mut Vec<Action>,
 ) {
     let pill = Rect::from_min_size(
-        Pos2::new(right - DOWNLOAD_WIDTH, bar.center().y - DOWNLOAD_HEIGHT / 2.0),
+        Pos2::new(
+            right - DOWNLOAD_WIDTH,
+            bar.center().y - DOWNLOAD_HEIGHT / 2.0,
+        ),
         vec2(DOWNLOAD_WIDTH, DOWNLOAD_HEIGHT),
     );
     let response = ui.interact(pill, ui.id().with("topbar-download"), Sense::click());
@@ -205,12 +211,19 @@ fn download_pill(
     let track_y = pill.bottom() - 4.0;
     let (track_left, track_right) = (pill.left() + 10.0, pill.right() - 10.0);
     painter.line_segment(
-        [Pos2::new(track_left, track_y), Pos2::new(track_right, track_y)],
+        [
+            Pos2::new(track_left, track_y),
+            Pos2::new(track_right, track_y),
+        ],
         egui::Stroke::new(2.0, theme::BORDER),
     );
     if let Some(progress) = download.progress {
         let end = track_left + (track_right - track_left) * progress;
-        let color = if download.paused { theme::GOLD } else { theme::ACCENT };
+        let color = if download.paused {
+            theme::GOLD
+        } else {
+            theme::ACCENT
+        };
         painter.line_segment(
             [Pos2::new(track_left, track_y), Pos2::new(end, track_y)],
             egui::Stroke::new(2.0, color),

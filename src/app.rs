@@ -557,10 +557,7 @@ impl App {
     fn show_chrome(&mut self, root: &mut egui::Ui, out: &mut Vec<Action>) {
         root.winui(|ui| {
             let area = ui.ctx().input(|i| i.viewport_rect());
-            let bar = egui::Rect::from_min_size(
-                area.min,
-                egui::vec2(area.width(), topbar::HEIGHT),
-            );
+            let bar = egui::Rect::from_min_size(area.min, egui::vec2(area.width(), topbar::HEIGHT));
             let main = egui::Rect::from_min_max(
                 egui::pos2(area.min.x + MAIN_MARGIN, bar.max.y),
                 egui::pos2(area.max.x - MAIN_MARGIN, area.max.y),
@@ -569,8 +566,11 @@ impl App {
             ui.painter().rect_filled(area, 0, theme::BG_APP);
 
             let page = self.page;
-            let download =
-                sidebar::DownloadSummary::current(&self.downloads, &self.catalog, &self.epic_catalog);
+            let download = sidebar::DownloadSummary::current(
+                &self.downloads,
+                &self.catalog,
+                &self.epic_catalog,
+            );
             ui.scope_builder(
                 egui::UiBuilder::new()
                     .max_rect(bar)

@@ -63,7 +63,13 @@ fn stats(ui: &mut egui::Ui, library: &Library, updates: &UpdateCheck, current: &
     let width = ((ui.available_width() - gap * 3.0) / 4.0).floor();
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = gap;
-        stat_tile(ui, width, "INSTALLED VERSION", &format!("v{current}"), "application");
+        stat_tile(
+            ui,
+            width,
+            "INSTALLED VERSION",
+            &format!("v{current}"),
+            "application",
+        );
         stat_tile(ui, width, "LATEST VERSION", &latest, "on GitHub");
         stat_tile(ui, width, "STATUS", state, "checking the application");
         stat_tile(ui, width, "GAMES", &games, "in library");
@@ -97,8 +103,13 @@ fn stat_tile(ui: &mut egui::Ui, width: f32, caption: &str, value: &str, hint: &s
                     .color(theme::ACCENT_LIGHT),
             );
             ui.add(
-                egui::Label::new(RichText::new(value).size(20.0).strong().color(theme::TEXT_TITLE))
-                    .truncate(),
+                egui::Label::new(
+                    RichText::new(value)
+                        .size(20.0)
+                        .strong()
+                        .color(theme::TEXT_TITLE),
+                )
+                .truncate(),
             );
             ui.add(
                 egui::Label::new(RichText::new(hint).size(11.0).color(theme::TEXT_SUBTLE))
@@ -144,7 +155,11 @@ fn app_card(ui: &mut egui::Ui, updates: &mut UpdateCheck, current: &str) -> bool
         ui.add_space(14.0);
 
         // Statut et progression de l'installation.
-        ui.label(RichText::new(&updates.status).size(12.5).color(theme::TEXT_MUTED));
+        ui.label(
+            RichText::new(&updates.status)
+                .size(12.5)
+                .color(theme::TEXT_MUTED),
+        );
         if let Some((received, total)) = updates.install_progress {
             ui.add_space(8.0);
             let known = total.filter(|t| *t > 0);
@@ -165,7 +180,11 @@ fn app_card(ui: &mut egui::Ui, updates: &mut UpdateCheck, current: &str) -> bool
                     );
                 }
                 None => {
-                    ui.add(egui::ProgressBar::new(0.0).animate(true).desired_height(6.0));
+                    ui.add(
+                        egui::ProgressBar::new(0.0)
+                            .animate(true)
+                            .desired_height(6.0),
+                    );
                     ui.label(
                         RichText::new(format!(
                             "Downloaded: {:.1} MB",
@@ -183,11 +202,14 @@ fn app_card(ui: &mut egui::Ui, updates: &mut UpdateCheck, current: &str) -> bool
             ui.add_space(16.0);
             let standard = format!("Universal Downloader v{}", release.version);
             if !release.name.trim().eq_ignore_ascii_case(&standard) {
-                ui.label(RichText::new(&release.name).strong().color(theme::TEXT_TITLE));
+                ui.label(
+                    RichText::new(&release.name)
+                        .strong()
+                        .color(theme::TEXT_TITLE),
+                );
             }
             let notes = release_summary(&release.notes).unwrap_or_else(|| {
-                "The installer and SHA-256 checksum are available on the release page."
-                    .to_owned()
+                "The installer and SHA-256 checksum are available on the release page.".to_owned()
             });
             egui::Frame::new()
                 .fill(theme::BG_APP)
@@ -197,10 +219,8 @@ fn app_card(ui: &mut egui::Ui, updates: &mut UpdateCheck, current: &str) -> bool
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.add(
-                        egui::Label::new(
-                            RichText::new(notes).size(12.0).color(theme::TEXT_MUTED),
-                        )
-                        .wrap(),
+                        egui::Label::new(RichText::new(notes).size(12.0).color(theme::TEXT_MUTED))
+                            .wrap(),
                     );
                 });
         }
@@ -238,7 +258,12 @@ fn app_card(ui: &mut egui::Ui, updates: &mut UpdateCheck, current: &str) -> bool
 fn version_block(ui: &mut egui::Ui, caption: &str, value: &str, color: Color32) {
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
-        ui.label(RichText::new(caption.to_uppercase()).size(10.0).strong().color(theme::TEXT_SUBTLE));
+        ui.label(
+            RichText::new(caption.to_uppercase())
+                .size(10.0)
+                .strong()
+                .color(theme::TEXT_SUBTLE),
+        );
         ui.label(RichText::new(value).size(22.0).strong().color(color));
     });
 }
@@ -259,12 +284,14 @@ fn xbox_card(ui: &mut egui::Ui, library: &Library) {
             12.0,
         ));
         ui.add_space(12.0);
-        ui.label(RichText::new(format!(
-            "{} game folder(s) in your library.",
-            library.entries.len()
-        ))
-        .size(13.0)
-        .color(theme::TEXT_TITLE));
+        ui.label(
+            RichText::new(format!(
+                "{} game folder(s) in your library.",
+                library.entries.len()
+            ))
+            .size(13.0)
+            .color(theme::TEXT_TITLE),
+        );
         ui.add_space(6.0);
         ui.add(
             egui::Label::new(widgets::muted(

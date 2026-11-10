@@ -22,7 +22,12 @@ pub fn page_header(ui: &mut egui::Ui, kicker: &str, title: &str, subtitle: &str)
             .color(theme::ACCENT_LIGHT),
     );
     ui.add_space(2.0);
-    ui.heading(RichText::new(title).size(30.0).strong().color(theme::TEXT_TITLE));
+    ui.heading(
+        RichText::new(title)
+            .size(30.0)
+            .strong()
+            .color(theme::TEXT_TITLE),
+    );
     ui.label(RichText::new(subtitle).size(13.0).color(theme::TEXT_MUTED));
     ui.add_space(14.0);
 }

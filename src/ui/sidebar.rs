@@ -75,8 +75,8 @@ impl DownloadSummary {
             && entry.speed > 0
             && entry.total > entry.received)
             .then(|| (entry.total - entry.received).div_ceil(entry.speed));
-        let progress = (entry.total > 0)
-            .then(|| (entry.received as f32 / entry.total as f32).clamp(0.0, 1.0));
+        let progress =
+            (entry.total > 0).then(|| (entry.received as f32 / entry.total as f32).clamp(0.0, 1.0));
         Some(Self {
             label,
             name: entry.name.clone(),
@@ -144,8 +144,7 @@ fn brand(ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         ui.add_space(INSET);
         let (rect, _) = ui.allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::hover());
-        ui.painter()
-            .rect_filled(rect, 6, theme::ACCENT);
+        ui.painter().rect_filled(rect, 6, theme::ACCENT);
         ui.painter().text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -185,9 +184,9 @@ fn nav_item(
     let selection = ui
         .ctx()
         .animate_bool_with_time(response.id.with("selected"), selected, 0.2);
-    let hover = ui
-        .ctx()
-        .animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
+    let hover =
+        ui.ctx()
+            .animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
 
     let painter = ui.painter();
     if selection > 0.0 {
@@ -268,9 +267,9 @@ fn download_card(
         egui::vec2(ui.available_width(), DOWNLOAD_CARD_HEIGHT),
         egui::Sense::click(),
     );
-    let hover = ui
-        .ctx()
-        .animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
+    let hover =
+        ui.ctx()
+            .animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
     let accent = if download.paused {
         theme::GOLD
     } else {
@@ -278,11 +277,7 @@ fn download_card(
     };
 
     let painter = ui.painter();
-    painter.rect_filled(
-        rect,
-        6,
-        theme::mix((22, 26, 34), (30, 35, 46), hover),
-    );
+    painter.rect_filled(rect, 6, theme::mix((22, 26, 34), (30, 35, 46), hover));
     painter.rect_stroke(
         rect,
         6,
@@ -369,12 +364,10 @@ fn download_card(
         );
     }
 
-    icons::chevron_right(14.0)
-        .tint(theme::TEXT_MUTED)
-        .paint_at(
-            ui,
-            egui::Rect::from_center_size(chevron_center, egui::vec2(14.0, 14.0)),
-        );
+    icons::chevron_right(14.0).tint(theme::TEXT_MUTED).paint_at(
+        ui,
+        egui::Rect::from_center_size(chevron_center, egui::vec2(14.0, 14.0)),
+    );
 
     let bar_y = rect.bottom() - 8.0;
     let bar_left = rect.left() + 12.0;

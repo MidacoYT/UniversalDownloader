@@ -77,7 +77,10 @@ impl AdaptiveLimit {
 enum TunerPhase {
     /// Laisse les nouvelles connexions monter en débit avant de mesurer.
     Settle(u32),
-    Measure { ticks: u32, sum: f64 },
+    Measure {
+        ticks: u32,
+        sum: f64,
+    },
     Hold(u32),
 }
 
@@ -1468,12 +1471,13 @@ fn verify_epic_files(
                             // Dernière tranche (10 %) de la barre unique : octets « virtuels »
                             // au-delà du téléchargement réel.
                             let extra = download_total / 9;
-                            let received = download_total
-                                .saturating_add((u128::from(extra) * u128::from(done)
+                            let received = download_total.saturating_add(
+                                (u128::from(extra) * u128::from(done)
                                     / u128::from(total_bytes.max(1)))
-                                    as u64);
-                            let speed = (done as f64 / started.elapsed().as_secs_f64().max(0.001))
-                                as u64;
+                                    as u64,
+                            );
+                            let speed =
+                                (done as f64 / started.elapsed().as_secs_f64().max(0.001)) as u64;
                             publish_progress(
                                 &tx,
                                 id,
@@ -1743,9 +1747,8 @@ fn run_epic_download(
             ));
         }
         if !resumed {
-            let output = File::create(&destination).map_err(|error| {
-                format!("Could not create {}: {error}", destination.display())
-            })?;
+            let output = File::create(&destination)
+                .map_err(|error| format!("Could not create {}: {error}", destination.display()))?;
             // Chunks are written at their final offsets in whatever order they arrive, so the
             // file must not pay for zero-filling the gaps between them (see `mark_file_sparse`).
             // On other platforms unwritten regions are sparse by default.
@@ -4156,8 +4159,8 @@ async fn download_xbox_range_async(
         }
         if !buffer.is_empty() {
             let started = Instant::now();
-                    write_xbox_block(file, buffer, buffer_position, &journal).await?;
-                    limit.add_write_time(started.elapsed());
+            write_xbox_block(file, buffer, buffer_position, &journal).await?;
+            limit.add_write_time(started.elapsed());
         }
         if offset == expected {
             // Le dernier enregistrement du journal indique segment complet (octets == taille).

@@ -68,13 +68,23 @@ fn art(card: &mut egui::Ui, game: &Game, texture: Option<&egui::TextureHandle>, 
             card,
             texture,
             rect,
-            egui::CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 },
+            egui::CornerRadius {
+                nw: 6,
+                ne: 6,
+                sw: 0,
+                se: 0,
+            },
             1.0 + 0.08 * zoom,
         ),
         None => images::paint_placeholder(
             card,
             rect,
-            egui::CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 },
+            egui::CornerRadius {
+                nw: 6,
+                ne: 6,
+                sw: 0,
+                se: 0,
+            },
             if game.image.is_empty() {
                 "AUCUNE IMAGE"
             } else {
@@ -106,7 +116,8 @@ fn art(card: &mut egui::Ui, game: &Game, texture: Option<&egui::TextureHandle>, 
         rect.left_bottom() + egui::vec2(8.0, -27.0),
         egui::vec2((text_width + 12.0).max(42.0), 20.0),
     );
-    card.painter().rect_filled(badge, 4, Color32::from_rgba_unmultiplied(8, 10, 14, 215));
+    card.painter()
+        .rect_filled(badge, 4, Color32::from_rgba_unmultiplied(8, 10, 14, 215));
     card.painter().rect_stroke(
         badge,
         4,
