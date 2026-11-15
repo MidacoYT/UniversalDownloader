@@ -24,22 +24,22 @@ const EPIC_CHUNK_ATTEMPTS: u32 = 4;
 /// inactifs entre deux requêtes et la bande passante du CDN est mieux saturée.
 const XBOX_RANGE_BYTES: u64 = 4 * 1024 * 1024;
 /// Nombre de connexions parallèles pour les segments Xbox.
-const XBOX_WORKERS: usize = 24;
+const XBOX_WORKERS: usize = 8;
 /// Nombre de workers parallèles pour les chunks Epic.
-const EPIC_CHUNK_WORKERS: usize = 16;
+const EPIC_CHUNK_WORKERS: usize = 8;
 /// Nombre de clients HTTP (donc de connexions TCP) pour les chunks Epic. En HTTP/2, un seul
 /// client multiplexe tout sur UNE connexion TCP, plafonnée par le CDN (~10 Mo/s) : on répartit
 /// les workers sur plusieurs clients pour ouvrir plusieurs connexions.
-const EPIC_CONNECTIONS: usize = 8;
+const EPIC_CONNECTIONS: usize = 4;
 /// Nombre de workers pour la vérification SHA-1 des fichiers Epic.
 const VERIFY_WORKERS: usize = 8;
 /// Bornes du nombre de requêtes simultanées, ajusté en direct selon le débit mesuré.
 /// `XBOX_WORKERS` et `EPIC_CHUNK_WORKERS` ne sont plus que les valeurs de départ.
-const ADAPTIVE_MIN_WORKERS: usize = 8;
-const ADAPTIVE_MAX_WORKERS: usize = 48;
+const ADAPTIVE_MIN_WORKERS: usize = 4;
+const ADAPTIVE_MAX_WORKERS: usize = 16;
 /// Pas d'augmentation à chaque essai et durée de maintien (en intervalles) après un essai raté.
-const ADAPTIVE_STEP: usize = 4;
-const ADAPTIVE_HOLD_INTERVALS: u32 = 5;
+const ADAPTIVE_STEP: usize = 2;
+const ADAPTIVE_HOLD_INTERVALS: u32 = 8;
 const ADAPTIVE_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Nombre de requêtes autorisées en même temps + octets reçus (pour mesurer le débit).
