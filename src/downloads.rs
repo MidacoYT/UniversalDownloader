@@ -37,28 +37,58 @@ const ADAPTIVE_STEP: usize = 1;
 const ADAPTIVE_HOLD_INTERVALS: u32 = 8;
 const ADAPTIVE_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Limite de débit par défaut (octets/s) : 5 Mo/s.
+const DEFAULT_BANDWIDTH_LIMIT: u64 = 5_000_000;
+/// Rafale autorisée, en secondes de débit.
+const BURST_SECONDS: f64 = 0.25;
+
 /// Débit maximal total des téléchargements, en octets/s. 0 = illimité.
 static BANDWIDTH_LIMIT: AtomicU64 = AtomicU64::new(0);
-/// Prochain instant où le réseau est « libre » pour le limiteur global.
-static THROTTLE_NEXT: Mutex<Option<Instant>> = Mutex::new(None);
 
-/// À appeler depuis les réglages (ex. 5 Mo/s). 0 désactive la limite.
+/// Seau à jetons partagé par tous les téléchargements.
+struct Bucket {
+    tokens: f64,
+    last: Instant,
+}
+static BUCKET: Mutex<Option<Bucket>> = Mutex::new(None);
+
+/// Définit la limite globale (octets/s). 0 désactive la limite.
 pub fn set_bandwidth_limit(bytes_per_sec: u64) {
     BANDWIDTH_LIMIT.store(bytes_per_sec, Ordering::Relaxed);
+    *BUCKET.lock().unwrap_or_else(PoisonError::into_inner) = None;
 }
 
-/// Réserve un créneau pour `bytes` octets et renvoie le délai à attendre avant de les lire.
+/// Limite au démarrage : 5 Mo/s, ou la valeur de UD_BANDWIDTH_LIMIT (octets/s) si elle est définie.
+fn default_bandwidth_limit() -> u64 {
+    std::env::var("UD_BANDWIDTH_LIMIT")
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(DEFAULT_BANDWIDTH_LIMIT)
+}
+
+/// Réserve `bytes` octets dans le seau et renvoie le délai à attendre avant de les accepter.
 fn reserve_bandwidth(bytes: u64) -> Duration {
-    let limit = BANDWIDTH_LIMIT.load(Ordering::Relaxed);
-    if limit == 0 || bytes == 0 {
+    let rate = BANDWIDTH_LIMIT.load(Ordering::Relaxed);
+    if rate == 0 || bytes == 0 {
         return Duration::ZERO;
     }
-    let cost = Duration::from_secs_f64(bytes as f64 / limit as f64);
-    let mut next = THROTTLE_NEXT.lock().unwrap_or_else(PoisonError::into_inner);
+    let rate = rate as f64;
+    let burst = rate * BURST_SECONDS;
     let now = Instant::now();
-    let slot = next.map_or(now, |planned| planned.max(now));
-    *next = Some(slot + cost);
-    slot.saturating_duration_since(now)
+    let mut guard = BUCKET.lock().unwrap_or_else(PoisonError::into_inner);
+    let bucket = guard.get_or_insert(Bucket {
+        tokens: burst,
+        last: now,
+    });
+    let elapsed = now.saturating_duration_since(bucket.last).as_secs_f64();
+    bucket.tokens = (bucket.tokens + elapsed * rate).min(burst);
+    bucket.last = now;
+    bucket.tokens -= bytes as f64;
+    if bucket.tokens >= 0.0 {
+        Duration::ZERO
+    } else {
+        Duration::from_secs_f64(-bucket.tokens / rate)
+    }
 }
 
 /// Version async (workers Xbox et Epic).
@@ -69,7 +99,7 @@ async fn throttle_async(bytes: u64) {
     }
 }
 
-/// Version bloquante (fallback séquentiel).
+/// Version bloquante (téléchargement séquentiel).
 fn throttle_blocking(bytes: u64) {
     let wait = reserve_bandwidth(bytes);
     if !wait.is_zero() {
@@ -629,6 +659,7 @@ pub struct DownloadManager {
 
 impl DownloadManager {
     pub fn new() -> Self {
+        set_bandwidth_limit(default_bandwidth_limit());
         let (tx, rx) = mpsc::channel();
         let mut manager = Self {
             entries: Vec::new(),
@@ -2598,8 +2629,8 @@ async fn fetch_epic_chunk_async(
     loop {
         match response.chunk().await {
             Ok(Some(bytes)) => {
-                limit.add_bytes(bytes.len() as u64);
                 throttle_async(bytes.len() as u64).await;
+                limit.add_bytes(bytes.len() as u64);
                 raw.extend_from_slice(&bytes);
                 if raw.len() as u64 - last_reported >= 256 * 1024 {
                     let downloaded = raw.len() as u64;
@@ -4543,14 +4574,13 @@ mod tests {
     }
 
     #[test]
-    fn bandwidth_limit_spaces_out_reservations() {
+    fn bucket_limits_average_rate() {
         set_bandwidth_limit(1_000_000);
-        *THROTTLE_NEXT.lock().unwrap() = None;
-        let first = reserve_bandwidth(500_000);
-        let second = reserve_bandwidth(500_000);
+        let first = reserve_bandwidth(250_000);
+        let second = reserve_bandwidth(1_000_000);
         set_bandwidth_limit(0);
         assert_eq!(first, Duration::ZERO);
-        assert!(second >= Duration::from_millis(400));
+        assert!(second >= Duration::from_millis(900));
     }
 
     #[test]
