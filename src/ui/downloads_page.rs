@@ -344,7 +344,7 @@ fn transfer_info(ui: &mut egui::Ui, entry: &Download, game: Option<&Game>) {
         } else {
             ui.label(status_text(&entry.status).size(12.0));
         }
-        let line = metrics(entry);
+        let line = metrics(ui, entry);
         if !line.is_empty() {
             ui.label(widgets::muted(line, 11.0));
         }
@@ -688,7 +688,9 @@ fn downloaded_size(entry: &Download) -> String {
 }
 
 /// Ligne de progression textuelle : octets, débit et temps restant.
-fn metrics(entry: &Download) -> String {
+/// L'ETA est lissé via un filtre exponentiel stocké dans la mémoire egui pour éviter
+/// les saccades dues aux variations de débit entre deux frames.
+fn metrics(ui: &egui::Ui, entry: &Download) -> String {
     let mut parts = Vec::new();
     // Extraction / vérification : `received` est un pourcentage (total = 100).
     if entry.status == DownloadStatus::Extracting && entry.total == 100 {
@@ -706,10 +708,20 @@ fn metrics(entry: &Download) -> String {
         parts.push(format_speed(entry.speed));
     }
     if entry.total > entry.received && entry.speed > 0 {
-        parts.push(format!(
-            "{} left",
-            format_eta(entry.total - entry.received, entry.speed)
-        ));
+        // ETA brut en secondes à partir du débit instantané.
+        let raw_eta = (entry.total - entry.received) as f64 / entry.speed as f64;
+        // Clé stable par téléchargement pour stocker l'ETA lissé.
+        let eta_key = egui::Id::new("eta_smooth").with(entry.id);
+        let smoothed: f64 = ui.data_mut(|d| {
+            let prev: f64 = d.get_temp(eta_key).unwrap_or(raw_eta);
+            // Filtre exponentiel α = 0.08 : met environ 12 s à réagir aux vrais changements
+            // mais absorbe les oscillations frame-à-frame.
+            let next = prev * 0.92 + raw_eta * 0.08;
+            d.insert_temp(eta_key, next);
+            next
+        });
+        // On n'affiche que les secondes entières pour éviter les micro-saccades.
+        parts.push(format!("{} left", format_eta_secs(smoothed.round() as u64)));
     }
     parts.join("  ·  ")
 }
@@ -753,11 +765,7 @@ fn format_speed(bytes_per_second: u64) -> String {
     format!("{speed:.1} {}", units[exponent])
 }
 
-fn format_eta(remaining: u64, bytes_per_second: u64) -> String {
-    if bytes_per_second == 0 {
-        return "--".into();
-    }
-    let seconds = remaining.div_ceil(bytes_per_second);
+fn format_eta_secs(seconds: u64) -> String {
     if seconds < 60 {
         format!("{seconds}s")
     } else if seconds < 3600 {
