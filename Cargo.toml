@@ -1,6 +1,6 @@
 [package]
 name = "universal-downloader"
-version = "0.1.48"
+version = "0.1.55"
 edition = "2024"
 
 [dependencies]

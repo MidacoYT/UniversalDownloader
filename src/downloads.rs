@@ -20,27 +20,62 @@ const MAX_DOWNLOAD_READ_RETRIES: u8 = 8;
 /// Nombre de tours complets sur la liste des CDN avant d'abandonner un chunk Epic.
 const EPIC_CHUNK_ATTEMPTS: u32 = 4;
 /// Taille de chaque segment Xbox téléchargé en parallèle.
-/// Des segments plus petits améliorent le pipeline : les workers restent moins longtemps
-/// inactifs entre deux requêtes et la bande passante du CDN est mieux saturée.
 const XBOX_RANGE_BYTES: u64 = 4 * 1024 * 1024;
 /// Nombre de connexions parallèles pour les segments Xbox.
-const XBOX_WORKERS: usize = 8;
+const XBOX_WORKERS: usize = 4;
 /// Nombre de workers parallèles pour les chunks Epic.
-const EPIC_CHUNK_WORKERS: usize = 8;
-/// Nombre de clients HTTP (donc de connexions TCP) pour les chunks Epic. En HTTP/2, un seul
-/// client multiplexe tout sur UNE connexion TCP, plafonnée par le CDN (~10 Mo/s) : on répartit
-/// les workers sur plusieurs clients pour ouvrir plusieurs connexions.
-const EPIC_CONNECTIONS: usize = 4;
+const EPIC_CHUNK_WORKERS: usize = 4;
+/// Nombre de clients HTTP (donc de connexions TCP) pour les chunks Epic.
+const EPIC_CONNECTIONS: usize = 2;
 /// Nombre de workers pour la vérification SHA-1 des fichiers Epic.
 const VERIFY_WORKERS: usize = 8;
 /// Bornes du nombre de requêtes simultanées, ajusté en direct selon le débit mesuré.
-/// `XBOX_WORKERS` et `EPIC_CHUNK_WORKERS` ne sont plus que les valeurs de départ.
-const ADAPTIVE_MIN_WORKERS: usize = 4;
-const ADAPTIVE_MAX_WORKERS: usize = 16;
+const ADAPTIVE_MIN_WORKERS: usize = 2;
+const ADAPTIVE_MAX_WORKERS: usize = 6;
 /// Pas d'augmentation à chaque essai et durée de maintien (en intervalles) après un essai raté.
-const ADAPTIVE_STEP: usize = 2;
+const ADAPTIVE_STEP: usize = 1;
 const ADAPTIVE_HOLD_INTERVALS: u32 = 8;
 const ADAPTIVE_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Débit maximal total des téléchargements, en octets/s. 0 = illimité.
+static BANDWIDTH_LIMIT: AtomicU64 = AtomicU64::new(0);
+/// Prochain instant où le réseau est « libre » pour le limiteur global.
+static THROTTLE_NEXT: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// À appeler depuis les réglages (ex. 5 Mo/s). 0 désactive la limite.
+pub fn set_bandwidth_limit(bytes_per_sec: u64) {
+    BANDWIDTH_LIMIT.store(bytes_per_sec, Ordering::Relaxed);
+}
+
+/// Réserve un créneau pour `bytes` octets et renvoie le délai à attendre avant de les lire.
+fn reserve_bandwidth(bytes: u64) -> Duration {
+    let limit = BANDWIDTH_LIMIT.load(Ordering::Relaxed);
+    if limit == 0 || bytes == 0 {
+        return Duration::ZERO;
+    }
+    let cost = Duration::from_secs_f64(bytes as f64 / limit as f64);
+    let mut next = THROTTLE_NEXT.lock().unwrap_or_else(PoisonError::into_inner);
+    let now = Instant::now();
+    let slot = next.map_or(now, |planned| planned.max(now));
+    *next = Some(slot + cost);
+    slot.saturating_duration_since(now)
+}
+
+/// Version async (workers Xbox et Epic).
+async fn throttle_async(bytes: u64) {
+    let wait = reserve_bandwidth(bytes);
+    if !wait.is_zero() {
+        tokio::time::sleep(wait).await;
+    }
+}
+
+/// Version bloquante (fallback séquentiel).
+fn throttle_blocking(bytes: u64) {
+    let wait = reserve_bandwidth(bytes);
+    if !wait.is_zero() {
+        std::thread::sleep(wait);
+    }
+}
 
 /// Nombre de requêtes autorisées en même temps + octets reçus (pour mesurer le débit).
 /// Les workers d'indice >= `target` restent en attente, sans quitter la file.
@@ -84,11 +119,8 @@ enum TunerPhase {
     Hold(u32),
 }
 
-/// Ajustement de la concurrence : on ne descend jamais sur un simple plateau (avec un CDN qui
-/// limite chaque connexion, le débit est proportionnel au nombre de connexions : réduire sur
-/// plateau ou sur une mesure bruitée bloquait le débit autour de 10 Mo/s). On monte par paliers ;
-/// si un palier n'apporte pas au moins 5 % de débit, on revient au précédent, on le garde
-/// quelques intervalles, puis on retente.
+/// Ajustement de la concurrence : on monte par paliers ; si un palier n'apporte pas au moins
+/// 5 % de débit, on revient au précédent, on le garde quelques intervalles, puis on retente.
 struct AdaptiveTuner {
     phase: TunerPhase,
     base: Option<f64>,
@@ -121,7 +153,6 @@ impl AdaptiveTuner {
     /// `rate` : débit mesuré sur le dernier intervalle (octets/s). Renvoie la nouvelle limite.
     fn next(&mut self, current: usize, rate: f64) -> usize {
         if rate < 1.0 {
-            // Pause ou coupure : rien ne bouge, la mesure repart de zéro à la reprise.
             self.phase = TunerPhase::Settle(2);
             self.base = None;
             self.trial = false;
@@ -231,13 +262,6 @@ fn hide_child_console(command: &mut Command) {
 }
 
 /// Marque un fichier de sortie comme creux (« sparse ») sur Windows.
-///
-/// Les chunks Epic arrivent dans un ordre arbitraire et sont écrits directement à leur
-/// offset final. Sur NTFS, la première écriture au-delà de la fin logique d'un fichier
-/// ordinaire force Windows à remplir de zéros tout l'espace intermédiaire de façon
-/// synchrone (plusieurs dizaines de secondes par Go), ce qui bloque le téléchargement et
-/// fait chuter la vitesse affichée. Un fichier creux ne réserve que les blocs réellement
-/// écrits ; les trous se relisent comme des zéros.
 #[cfg(windows)]
 fn mark_file_sparse(file: &File) -> io::Result<()> {
     use std::ffi::c_void;
@@ -278,9 +302,7 @@ fn mark_file_sparse(file: &File) -> io::Result<()> {
     }
 }
 
-/// Runtime Tokio partagé par les transferts. Un client asynchrone multiplexe ses requêtes
-/// HTTP/2 sur une seule connexion : plusieurs chunks restent en vol en même temps, alors que
-/// `reqwest::blocking` attend la réponse de chaque appel avant de rendre la main.
+/// Runtime Tokio partagé par les transferts.
 fn download_runtime() -> Result<&'static tokio::runtime::Runtime, String> {
     static RUNTIME: std::sync::OnceLock<Result<tokio::runtime::Runtime, String>> =
         std::sync::OnceLock::new();
@@ -546,8 +568,7 @@ impl Control {
         *state != ControlState::Cancelled
     }
 
-    /// Attente non bloquante pour le code async : bloquer un thread du runtime pendant une
-    /// pause empêcherait les requêtes encore en vol d'avancer.
+    /// Attente non bloquante pour le code async.
     async fn wait_until_resumed_async(&self) -> bool {
         loop {
             match self.get() {
@@ -598,8 +619,7 @@ pub struct DownloadManager {
     next_id: u64,
     tx: mpsc::Sender<DownloadEvent>,
     rx: Receiver<DownloadEvent>,
-    /// Dernier contenu écrit dans le fichier d'état : évite de réécrire le disque à chaque
-    /// événement de progression alors que la liste persistée n'a pas changé.
+    /// Dernier contenu écrit dans le fichier d'état.
     last_persisted: Mutex<Vec<u8>>,
     queue: Arc<DownloadQueue>,
     library_needs_scan: bool,
@@ -1110,7 +1130,6 @@ impl DownloadManager {
                     if let Some(entry) = self.entries.iter_mut().find(|item| item.id == id) {
                         entry.received = percent.min(100);
                         entry.total = 100;
-                        // Le débit du téléchargement n'a plus de sens ici (vitesse/ETA périmés).
                         entry.speed = 0;
                         entry.status = match entry.control.get() {
                             ControlState::Running => DownloadStatus::Extracting,
@@ -1122,8 +1141,6 @@ impl DownloadManager {
                 }
                 Ok(DownloadEvent::InstallerProgress { id, percent }) => {
                     if let Some(entry) = self.entries.iter_mut().find(|item| item.id == id) {
-                        // The transfer keeps its own bar; this one reports the installer
-                        // being expanded in the background.
                         entry.installer_percent = Some(percent.min(100));
                         changed = true;
                     }
@@ -1131,7 +1148,6 @@ impl DownloadManager {
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
         }
-        // Reprise demandée pendant que le thread Xbox terminait sa pause : on en relance un.
         for id in respawn {
             self.resume(id);
             changed = true;
@@ -1143,9 +1159,7 @@ impl DownloadManager {
         changed
     }
 
-    /// Retire les installations terminées dont le dossier a disparu. Un `exists()` par entrée
-    /// à chaque frame coûte cher (antivirus, disque réseau ou en veille) : on espace les
-    /// contrôles de 2 s, ce qui suffit largement pour détecter une suppression manuelle.
+    /// Retire les installations terminées dont le dossier a disparu (contrôle espacé de 2 s).
     fn prune_missing_completed(&mut self) -> bool {
         const PRUNE_INTERVAL: Duration = Duration::from_secs(2);
         if self.last_prune.elapsed() < PRUNE_INTERVAL {
@@ -1228,9 +1242,7 @@ struct EpicFile {
     sha1: Vec<u8>,
     parts: Vec<EpicPart>,
 }
-/// Journal de reprise d'une installation Epic (fichier caché dans le dossier du jeu) : chunks
-/// déjà écrits (`C <guid>`) et fichiers déjà vérifiés (`V <chemin>`). Il permet de reprendre
-/// après une fermeture de l'appli sans tout retélécharger ni tout revérifier.
+/// Journal de reprise d'une installation Epic (fichier caché dans le dossier du jeu).
 struct EpicJournal {
     path: PathBuf,
     writer: Mutex<Option<std::io::BufWriter<File>>>,
@@ -1250,7 +1262,6 @@ impl EpicJournal {
                 .append(true)
                 .open(&path)
                 .and_then(|mut file| {
-                    // Une dernière ligne tronquée par une fermeture brutale est isolée.
                     writeln!(file)?;
                     Ok(file)
                 })
@@ -1316,7 +1327,6 @@ impl EpicJournal {
 fn load_epic_journal(path: &Path, key: &str) -> Option<EpicJournalState> {
     let raw = fs::read(path).ok()?;
     let text = String::from_utf8_lossy(&raw);
-    // Dernière ligne éventuellement incomplète : ignorée.
     let complete = &text[..text.rfind('\n')?];
     let mut lines = complete.lines();
     if lines.next()? != format!("EPICJ1 {key}") {
@@ -1339,9 +1349,7 @@ fn load_epic_journal(path: &Path, key: &str) -> Option<EpicJournalState> {
     Some((chunks, verified))
 }
 
-/// Poignées de fichiers de sortie réutilisées entre les chunks Epic. Un jeu compte des milliers
-/// de chunks : rouvrir le fichier cible pour chacun coûte un appel système (et un passage
-/// d'antivirus sous Windows) par écriture, exécuté sur le thread qui reçoit aussi la progression.
+/// Poignées de fichiers de sortie réutilisées entre les chunks Epic.
 #[derive(Default)]
 struct OutputHandles {
     files: std::collections::HashMap<PathBuf, File>,
@@ -1373,14 +1381,13 @@ impl OutputHandles {
         }
     }
 
-    /// Ferme la poignée d'un fichier terminé (avant qu'un autre thread ne le lise ou le supprime).
+    /// Ferme la poignée d'un fichier terminé.
     fn forget(&mut self, path: &Path) {
         self.files.remove(path);
     }
 }
 
-/// Vérifie les SHA-1 des fichiers reconstruits avec quelques threads : lire un seul fichier à
-/// la fois laisse un SSD presque au repos et la vérification d'un gros jeu dure des minutes.
+/// Vérifie les SHA-1 des fichiers reconstruits avec quelques threads.
 fn verify_epic_files(
     files: &[(PathBuf, Vec<u8>)],
     total_bytes: u64,
@@ -1424,11 +1431,9 @@ fn verify_epic_files(
                         break;
                     };
                     if !path.exists() && is_upc_volume(path) {
-                        // Volume expanded slice by slice (each slice SHA-1 checked) and removed.
                         continue;
                     }
                     if already_verified.contains(path.to_string_lossy().as_ref()) && path.exists() {
-                        // Fichier déjà vérifié avant l'interruption.
                         verified.fetch_add(
                             fs::metadata(path).map(|meta| meta.len()).unwrap_or(0),
                             Ordering::Relaxed,
@@ -1468,8 +1473,6 @@ fn verify_epic_files(
                             .unwrap_or(100)
                             .min(100);
                         if last_percent.fetch_max(percent, Ordering::Relaxed) < percent {
-                            // Dernière tranche (10 %) de la barre unique : octets « virtuels »
-                            // au-delà du téléchargement réel.
                             let extra = download_total / 9;
                             let received = download_total.saturating_add(
                                 (u128::from(extra) * u128::from(done)
@@ -1502,8 +1505,7 @@ fn verify_epic_files(
     }
 }
 
-/// File de téléchargement : fichiers triés par `ranks` (stable), chunks dans l'ordre des parties,
-/// chaque chunk (éventuellement partagé entre fichiers) une seule fois.
+/// File de téléchargement : fichiers triés par `ranks` (stable), chunks dans l'ordre des parties.
 fn order_epic_chunks(
     files: &[EpicFile],
     by_guid: &std::collections::HashMap<[u32; 4], EpicChunk>,
@@ -1537,9 +1539,7 @@ struct EpicChunkTarget {
     size: u32,
 }
 
-/// Débit moyen sur une fenêtre glissante : le téléchargement Epic arrive par chunks, donc on
-/// ne peut pas se contenter d'un échantillon instantané. Seuls les octets réellement
-/// téléchargés comptent (pas les chunks repris depuis le cache).
+/// Débit moyen sur une fenêtre glissante.
 struct SpeedMeter {
     samples: VecDeque<(Instant, u64)>,
     total: u64,
@@ -1623,10 +1623,6 @@ fn run_epic_download(
     let (chunks, files, feature, prereq) = parse_epic_manifest(&bytes)?;
     let by_guid: std::collections::HashMap<_, _> =
         chunks.into_iter().map(|c| (c.guid, c)).collect();
-    // Jeu Ubisoft : le build Epic embarque le paquet « disc » et l'installeur Ubisoft déclaré
-    // comme prérequis. Le launcher Epic exécute ce prérequis (Ubisoft Connect installe alors
-    // depuis les fichiers locaux). On fait pareil, sauf si le réglage est coupé ou si le
-    // prérequis n'est pas dans le build : l'extraction directe reste alors le comportement.
     let has_ubisoft_disc = ["uplay_install.disc", "uplay_install.manifest"]
         .iter()
         .all(|name| {
@@ -1650,13 +1646,8 @@ fn run_epic_download(
     if bytes_total == 0 {
         return Err("Epic manifest contains no chunks.".into());
     }
-    // Une seule barre, comme le launcher Epic : le téléchargement occupe les 90 premiers %,
-    // la vérification des fichiers les 10 derniers.
     let display_total = bytes_total.saturating_add(bytes_total / 9);
-    // Reprise : le journal n'est réutilisé que pour le même manifest, et si les fichiers du jeu
-    // sont toujours là (un volume Ubisoft déjà extrait puis supprimé est normal).
     let manifest_key: String = {
-        use sha1::Digest;
         sha1::Sha1::digest(&bytes)
             .iter()
             .map(|byte| format!("{byte:02x}"))
@@ -1684,14 +1675,10 @@ fn run_epic_download(
     let mut chunk_targets = std::collections::HashMap::<[u32; 4], Vec<EpicChunkTarget>>::new();
     let mut files_to_verify = Vec::<(PathBuf, Vec<u8>)>::with_capacity(files.len());
     let mut total_output_bytes = 0u64;
-    // Ubisoft volumes can be expanded as soon as every chunk that feeds them has
-    // been written, instead of waiting for the whole download to finish.
     let mut volume_chunks = std::collections::HashMap::<PathBuf, usize>::new();
     let mut meta_paths = std::collections::HashSet::<PathBuf>::new();
     let mut meta_outstanding = 0usize;
 
-    // Create final output files up front and record where each chunk belongs.
-    // Chunks are decompressed in memory and written directly to these locations.
     for file in &files {
         let relative = Path::new(&file.name);
         if relative.is_absolute()
@@ -1728,9 +1715,6 @@ fn run_epic_download(
             output_offset = output_offset.saturating_add(part.size as u64);
         }
         let name_only = destination.file_name().and_then(|name| name.to_str());
-        // Les volumes sont toujours expansés : le prérequis Ubisoft déclaré par Epic n'est que
-        // l'installeur du client Ubisoft Connect, pas celui du jeu. Il ne crée aucun fichier de
-        // jeu, donc s'en remettre à lui laissait une installation vide.
         if is_upc_volume(&destination) {
             volume_chunks.insert(destination.clone(), file.parts.len());
         } else if matches!(
@@ -1749,9 +1733,6 @@ fn run_epic_download(
         if !resumed {
             let output = File::create(&destination)
                 .map_err(|error| format!("Could not create {}: {error}", destination.display()))?;
-            // Chunks are written at their final offsets in whatever order they arrive, so the
-            // file must not pay for zero-filling the gaps between them (see `mark_file_sparse`).
-            // On other platforms unwritten regions are sparse by default.
             #[cfg(windows)]
             if let Err(error) = mark_file_sparse(&output) {
                 download_log(format!(
@@ -1761,15 +1742,10 @@ fn run_epic_download(
             }
             drop(output);
         }
-        // En reprise, les fichiers existants sont conservés tels quels (sans troncature).
         total_output_bytes = total_output_bytes.saturating_add(output_offset);
         files_to_verify.push((destination, file.sha1.clone()));
     }
 
-    // Ordre de téléchargement : métadonnées Ubisoft d'abord, puis les volumes un par un, puis
-    // le reste. Avant, la file suivait l'ordre aléatoire d'une HashMap : les chunks de tous les
-    // volumes arrivaient mélangés, aucun volume n'était complet avant la toute fin, et
-    // l'extraction « incrémentale » n'avait en pratique rien à extraire pendant le téléchargement.
     let ranks: Vec<u8> = files
         .iter()
         .map(|file| {
@@ -1787,7 +1763,6 @@ fn run_epic_download(
     let _ = fs::create_dir_all(&root);
     let journal = Arc::new(EpicJournal::open(journal_path, &manifest_key, resumed));
     if resumed {
-        // Chunks déjà écrits : ni retéléchargés, ni recomptés dans les volumes/métadonnées Ubisoft.
         pending.retain(|chunk| !done_chunks.contains(&chunk.guid));
         for guid in &done_chunks {
             if let Some(targets) = chunk_targets.get(guid) {
@@ -1807,11 +1782,7 @@ fn run_epic_download(
         publish_progress(&tx, id, received_chunks, display_total, 0);
     }
 
-    // Epic manifests can contain thousands of small chunks. Fetching them one at a time
-    // leaves the connection idle between requests, so use a bounded worker pool.
     let pending_count = pending.len();
-    // Start measuring only once the output files are prepared: the setup time must not
-    // count as download time, otherwise the first reported speed is far too low.
     let mut meter = SpeedMeter::new();
     let installer_dir = root.join("Installer");
     let (extract_tx, extract_rx) = mpsc::channel::<ExtractRequest>();
@@ -1823,7 +1794,6 @@ fn run_epic_download(
             run_incremental_extraction(extract_rx, installer_dir, output_dir, tx, id)
         })
     };
-    // A volume can only be expanded once the disc index and manifest are complete.
     let mut extraction_ready = !meta_paths.is_empty() && meta_outstanding == 0;
     let mut waiting_volumes = Vec::<PathBuf>::new();
     if volume_chunks.is_empty() {
@@ -1831,7 +1801,6 @@ fn run_epic_download(
     } else if extraction_ready {
         let _ = extract_tx.send(ExtractRequest::Ready);
         for (path, pending) in &volume_chunks {
-            // Un volume déjà extrait (donc supprimé) avant l'interruption n'est pas rejoué.
             if *pending == 0 && path.exists() {
                 waiting_volumes.push(path.clone());
             }
@@ -1988,10 +1957,8 @@ fn run_epic_download(
                     }
                 }
             }
-            // Pause longue, erreur ou fermeture : l'état écrit est rendu durable avant de sortir.
             handles.sync_all();
             journal.flush();
-            // Première erreur (ou annulation) : on n'attend pas la fin de la file.
             workers.abort_all();
             while workers.join_next().await.is_some() {}
             if let Some(error) = first_error {
@@ -2009,8 +1976,6 @@ fn run_epic_download(
     let extraction = extraction
         .join()
         .map_err(|_| "Ubisoft extraction thread panicked.".to_owned())?;
-    // A download error must not leave the extraction thread writing into a folder the
-    // caller is about to delete, so it is stopped and joined before it is reported.
     stream_result?;
     let ExtractionOutcome {
         unpacker,
@@ -2026,8 +1991,6 @@ fn run_epic_download(
         ));
     }
 
-    // Verify the reconstructed files after streaming completes. This reads them in
-    // bounded memory and reports the final integrity-check phase in the UI.
     if let Err(error) = verify_epic_files(
         &files_to_verify,
         total_output_bytes,
@@ -2039,17 +2002,11 @@ fn run_epic_download(
         id,
     ) {
         if error != "cancelled" {
-            // Fichier corrompu : la prochaine tentative repart d'un état propre.
             journal.remove();
         }
         return Err(error);
     }
     let _ = tx.send(DownloadEvent::ExtractionProgress { id, percent: 100 });
-    // Le prérequis Ubisoft du manifest n'est que l'installeur du client Ubisoft Connect
-    // (`UplayInstaller.exe`, produit « Uplay 85.0 installer »). Il ne dépose aucun fichier de
-    // jeu : on l'exécute pour installer le client, mais c'est toujours l'extraction directe des
-    // volumes `.upc` qui installe le jeu. Il tourne avant `finish()` car celui-ci supprime le
-    // dossier `Installer` qui le contient.
     let ubisoft_connect = if connect_mode {
         download_log(format!(
             "Epic Ubisoft build: installing Ubisoft Connect with {:?} {:?} in {}",
@@ -2063,8 +2020,6 @@ fn run_epic_download(
     };
 
     let unpacked = if let Some(prepared) = unpacker {
-        // The disc index and manifest have just been verified and every volume was
-        // expanded slice by slice, so the consumed installer can be removed now.
         if let Err(error) = prepared.finish() {
             download_log(format!(
                 "Epic Ubisoft installer extraction failed in {}: {error}",
@@ -2107,7 +2062,6 @@ fn run_epic_download(
         )),
         None => {}
     }
-    // Installation terminée : plus rien à reprendre.
     journal.remove();
     Ok(())
 }
@@ -2128,9 +2082,7 @@ fn same_manifest_path(a: &str, b: &str) -> bool {
     normalize(a) == normalize(b)
 }
 
-/// Lance le prérequis déclaré par le manifest (l'installeur Ubisoft) comme le fait le launcher
-/// Epic : exécutable relatif au dossier du jeu, arguments du manifest, dossier du jeu comme
-/// répertoire courant. Attend sa fin ; une élévation UAC est demandée si nécessaire.
+/// Lance le prérequis déclaré par le manifest (l'installeur Ubisoft).
 fn run_ubisoft_prereq(root: &Path, prereq: &EpicPrereq, control: &Control) -> Result<(), String> {
     let relative = prereq.path.trim().replace('\\', "/");
     let relative_path = Path::new(&relative);
@@ -2205,7 +2157,6 @@ fn spawn_elevated(exe: &Path, args: &str, dir: &Path) -> Result<std::process::Ch
 
 /// Requests sent from the download loop to the thread expanding Ubisoft volumes.
 enum ExtractRequest {
-    /// The disc index and manifest are complete: volumes can now be expanded.
     Ready,
     Volume(PathBuf),
     Stop,
@@ -2222,8 +2173,7 @@ fn is_upc_volume(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("upc"))
 }
 
-/// Expands each Ubisoft volume as soon as the download has written it, so extraction
-/// overlaps the remaining download instead of starting only once it is finished.
+/// Expands each Ubisoft volume as soon as the download has written it.
 fn run_incremental_extraction(
     requests: mpsc::Receiver<ExtractRequest>,
     installer_dir: PathBuf,
@@ -2276,13 +2226,12 @@ fn run_incremental_extraction(
         }
     }
     if error.is_some() {
-        // Keep the consumed installer so the failure is visible with the other files.
         unpacker = None;
     }
     ExtractionOutcome { unpacker, error }
 }
 
-/// Prérequis déclaré par le manifest Epic (exécuté par le launcher Epic après l'installation).
+/// Prérequis déclaré par le manifest Epic.
 #[derive(Default)]
 struct EpicPrereq {
     name: String,
@@ -2505,10 +2454,7 @@ impl<'a> EpicReader<'a> {
     }
 }
 
-/// Un chunk Epic pèse environ 1 Mo et les CDN publics coupent parfois une connexion
-/// (reset, DNS, proxy). Sans nouvelle tentative, une seule coupure fait échouer un
-/// téléchargement de plusieurs dizaines de Go, donc on retente chaque chunk en
-/// repassant sur la liste des CDN avec un délai croissant.
+/// Délai avant une nouvelle tentative de chunk Epic.
 fn epic_chunk_retry_delay(attempt: u32) -> Duration {
     Duration::from_millis(500 * (1 << attempt.min(5)))
 }
@@ -2528,8 +2474,7 @@ async fn sleep_while_running_async(control: &Control, delay: Duration) -> bool {
     }
 }
 
-/// Un worker Epic : prend les chunks de la file et les télécharge sans jamais bloquer le
-/// runtime, pour que toutes les requêtes en vol partagent la même connexion HTTP/2.
+/// Un worker Epic : prend les chunks de la file et les télécharge sans bloquer le runtime.
 #[allow(clippy::too_many_arguments)]
 async fn epic_chunk_worker(
     index: usize,
@@ -2547,7 +2492,6 @@ async fn epic_chunk_worker(
             if queue.is_empty() {
                 break;
             }
-            // Au-delà de la limite courante, le worker attend sans prendre de chunk.
             if index >= limit.target() {
                 None
             } else {
@@ -2655,6 +2599,7 @@ async fn fetch_epic_chunk_async(
         match response.chunk().await {
             Ok(Some(bytes)) => {
                 limit.add_bytes(bytes.len() as u64);
+                throttle_async(bytes.len() as u64).await;
                 raw.extend_from_slice(&bytes);
                 if raw.len() as u64 - last_reported >= 256 * 1024 {
                     let downloaded = raw.len() as u64;
@@ -2714,8 +2659,6 @@ fn send_epic_progress(
                 .min(chunk.size)
         })
         .unwrap_or(0);
-    // Progress is cosmetic: when the queue is full it is dropped instead of slowing the
-    // transfer down. A closed queue means the whole download was abandoned.
     match progress_tx.try_send(EpicWorkerMessage::Progress {
         guid: chunk.guid,
         downloaded,
@@ -2737,8 +2680,7 @@ fn reset_epic_progress(
     });
 }
 
-/// `reqwest` n'affiche que « error sending request » : on ajoute la chaîne des causes
-/// (DNS, TLS, connexion fermée…) pour que l'erreur finale soit exploitable.
+/// Ajoute la chaîne des causes à l'erreur reqwest (DNS, TLS, connexion fermée…).
 fn describe_request_error(error: reqwest::Error) -> String {
     let error = error.without_url();
     let mut message = error.to_string();
@@ -2803,7 +2745,6 @@ fn epic_chunk_data(raw: &[u8]) -> Result<Vec<u8>, String> {
     let payload = r.take(size)?;
     if stored & 1 != 0 {
         let mut z = flate2::read::ZlibDecoder::new(payload);
-        // Les chunks Epic décompressent à 1 Mio : évite les réallocations successives.
         let mut out = Vec::with_capacity(1 << 20);
         z.read_to_end(&mut out).map_err(|e| e.to_string())?;
         Ok(out)
@@ -3534,9 +3475,7 @@ fn resolve_xbox_package(product_id: &str) -> Result<(String, u64), String> {
         .get("https://xbox.skydevil.xyz/Game/GetGamePackage")
         .query(&[
             ("contentId", content_id.as_str()),
-            // The package selected from DisplayCatalog is Windows.Desktop
-            // MSIXVC. Xbox Download Assistant uses platform 9 for PC; 0
-            // resolves the console package (often only a Blob root here).
+            // Windows.Desktop MSIXVC : platform 9 (PC). 0 résout le paquet console.
             ("platform", "9"),
             ("size", &size.to_string()),
         ])
@@ -3647,7 +3586,6 @@ fn resolve_xbox_package(product_id: &str) -> Result<(String, u64), String> {
         safe_url(&url),
         query_summary(&url)
     ));
-    // Keep the resolver's exact signed URL representation, as the original Electron client does.
     Ok((raw_url.to_owned(), size))
 }
 
@@ -3660,13 +3598,9 @@ fn transfer_xbox_ranges(
     control: &Arc<Control>,
     tx: &mpsc::Sender<DownloadEvent>,
 ) -> Result<bool, String> {
-    // The whole byte-range transfer runs on the async client: every segment stays in flight on
-    // the same connection (HTTP/2 multiplexing when the CDN negotiates it).
     let runtime = download_runtime()?;
     let ranged: Option<u64> = match runtime.block_on(async {
         let client = async_client(Duration::from_secs(180))?;
-        // Confirm that this particular package endpoint honors a bounded byte range. Some Xbox
-        // asset hosts return 206 for an open-ended range while ignoring its requested end.
         let (total, supported) = probe_xbox_ranges(&client, url, expected_size).await;
         if !supported || total == 0 {
             return Ok::<_, String>(None);
@@ -3688,8 +3622,6 @@ fn transfer_xbox_ranges(
         download_log(format!(
             "Xbox server does not confirm bounded ranges; using the regular stream (expected_size={expected_size})"
         ));
-        // A file pre-sized by an earlier ranged attempt would look complete to the sequential
-        // transfer, which resumes from the file length: start it from a clean file.
         if xbox_ranges_path(partial_path).exists() {
             let _ = fs::remove_file(xbox_ranges_path(partial_path));
             OpenOptions::new()
@@ -3701,8 +3633,6 @@ fn transfer_xbox_ranges(
         return transfer(url, true, destination, partial_path, id, control, tx);
     };
 
-    // The segments were written straight to their final offsets in the partial file: there is
-    // nothing to assemble, so no second copy of the package is ever needed on disk.
     if !control.wait_until_resumed() {
         remove_partial(partial_path)?;
         return Ok(false);
@@ -3773,10 +3703,7 @@ async fn probe_xbox_ranges(client: &reqwest::Client, url: &str, expected_size: u
     }
 }
 
-/// Journal de progression : suite d'enregistrements de 16 octets little-endian
-/// (offset de début du segment, octets déjà écrits dans ce segment), ajoutés au fil de l'eau
-/// après chaque écriture sur disque. Le paquet est écrit directement à son emplacement final :
-/// pas d'assemblage ni de double espace disque, et la reprise se fait à l'octet près.
+/// Journal de progression des segments Xbox (16 octets par enregistrement).
 fn xbox_ranges_path(partial_path: &Path) -> PathBuf {
     let mut name = partial_path.file_name().unwrap_or_default().to_os_string();
     name.push(".journal");
@@ -3843,8 +3770,7 @@ struct SegmentJournal<'a> {
     segment_start: u64,
 }
 
-/// Écrit un bloc sur un thread dédié aux E/S bloquantes, pour ne pas figer les flux réseau,
-/// puis journalise l'avancement du segment (les données d'abord, le journal ensuite).
+/// Écrit un bloc sur un thread dédié aux E/S bloquantes, puis journalise l'avancement.
 async fn write_xbox_block(
     file: &Arc<File>,
     data: Vec<u8>,
@@ -3864,8 +3790,7 @@ async fn write_xbox_block(
     .map_err(|error| format!("Could not write Xbox range segment: {error}"))
 }
 
-/// Télécharge les segments Xbox manquants directement à leur offset final dans le fichier
-/// partiel. Le nombre de requêtes simultanées s'ajuste en direct selon le débit.
+/// Télécharge les segments Xbox manquants directement à leur offset final.
 async fn download_xbox_segments_async(
     client: &reqwest::Client,
     url: &str,
@@ -3875,7 +3800,6 @@ async fn download_xbox_segments_async(
     control: &Arc<Control>,
     tx: &mpsc::Sender<DownloadEvent>,
 ) -> Result<(), String> {
-    // Anciennes versions : segments `.range.N` séparés. Ils ne sont plus utilisés.
     if has_legacy_xbox_segments(partial_path) {
         remove_xbox_segments(partial_path, total)?;
     }
@@ -3893,9 +3817,6 @@ async fn download_xbox_segments_async(
     let progress = if current_len == total {
         read_xbox_progress(&ranges_path, total)
     } else {
-        // Nouveau téléchargement (ou fichier sans rapport) : on repart d'un fichier vide
-        // de la taille finale. Un fichier creux (« sparse ») ne réserve pas l'espace et évite
-        // le remplissage de zéros par NTFS lors des écritures hors séquence.
         let _ = fs::remove_file(&ranges_path);
         file.set_len(0)
             .map_err(|error| format!("Could not reset the Xbox package file: {error}"))?;
@@ -3911,7 +3832,6 @@ async fn download_xbox_segments_async(
     };
     let file = Arc::new(file);
 
-    // (début, fin, octets déjà écrits) : un segment partiel reprend exactement où il s'est arrêté.
     let mut jobs = VecDeque::new();
     let mut already_received = 0u64;
     let mut segment_start = 0u64;
@@ -3963,7 +3883,6 @@ async fn download_xbox_segments_async(
                     if queue.is_empty() {
                         break;
                     }
-                    // Au-delà de la limite courante, le worker attend sans prendre de segment.
                     if index >= limit.target() {
                         None
                     } else {
@@ -4002,8 +3921,6 @@ async fn download_xbox_segments_async(
     while completed < job_count {
         match result_rx.recv().await {
             Some(Ok(())) => completed += 1,
-            // Pause : chaque worker vide son tampon dans le fichier et le journal avant de
-            // s'arrêter, on les laisse donc finir au lieu de les interrompre.
             Some(Err(error)) if error == "paused" => completed += 1,
             Some(Err(error)) => {
                 first_error = Some(error);
@@ -4012,8 +3929,6 @@ async fn download_xbox_segments_async(
             None => break,
         }
     }
-    // Stoppe les workers restants et attend leur fin : plus aucune écriture ne peut avoir
-    // lieu pendant que l'appelant nettoie ou reprend.
     workers.abort_all();
     while workers.join_next().await.is_some() {}
     if control.get() == ControlState::Paused {
@@ -4057,8 +3972,6 @@ async fn download_xbox_range_async(
         path: ranges_path,
         segment_start: start,
     };
-    // Reprise exacte : on repart de l'octet suivant le dernier octet journalisé, et les
-    // nouvelles tentatives reprennent là où le flux s'est arrêté.
     let mut offset = initial;
     let mut retries = 0u8;
     while offset < expected {
@@ -4069,18 +3982,49 @@ async fn download_xbox_range_async(
             return Err("cancelled".into());
         }
         let request_start = start + offset;
-        let mut response = client
+        let response_result = client
             .get(url)
             .header(USER_AGENT, XBOX_ASSET_USER_AGENT)
             .header(RANGE, format!("bytes={request_start}-{end}"))
             .send()
-            .await
-            .map_err(|error| format!("Download request failed: {}", error.without_url()))?;
+            .await;
+        let mut response = match response_result {
+            Ok(r) => r,
+            Err(error) => {
+                retries = retries.saturating_add(1);
+                if retries > MAX_DOWNLOAD_READ_RETRIES {
+                    return Err(format!(
+                        "Download request failed after {MAX_DOWNLOAD_READ_RETRIES} retries: {}",
+                        error.without_url()
+                    ));
+                }
+                download_log(format!(
+                    "Xbox segment connect failed (retry {retries}/{MAX_DOWNLOAD_READ_RETRIES}): {}",
+                    error.without_url()
+                ));
+                let pause = Duration::from_millis(500 * u64::from(retries.min(10)));
+                if !sleep_while_running_async(control, pause).await {
+                    return Err("cancelled".into());
+                }
+                continue;
+            }
+        };
         if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
-            return Err(format!(
-                "Download request failed: Xbox range request returned {}.",
-                response.status()
+            let status = response.status();
+            retries = retries.saturating_add(1);
+            if retries > MAX_DOWNLOAD_READ_RETRIES {
+                return Err(format!(
+                    "Download request failed: Xbox range request returned {status}."
+                ));
+            }
+            download_log(format!(
+                "Xbox segment HTTP {status} (retry {retries}/{MAX_DOWNLOAD_READ_RETRIES})"
             ));
+            let pause = Duration::from_millis(500 * u64::from(retries.min(10)));
+            if !sleep_while_running_async(control, pause).await {
+                return Err("cancelled".into());
+            }
+            continue;
         }
         let range = response
             .headers()
@@ -4102,7 +4046,6 @@ async fn download_xbox_range_async(
             if control.get() != ControlState::Running {
                 let paused = control.get() == ControlState::Paused;
                 if paused && !buffer.is_empty() {
-                    // Rien n'est perdu à la pause : le tampon part dans le fichier et le journal.
                     let started = Instant::now();
                     write_xbox_block(file, buffer, buffer_position, &journal).await?;
                     limit.add_write_time(started.elapsed());
@@ -4119,6 +4062,7 @@ async fn download_xbox_range_async(
                     if offset.saturating_add(count as u64) > expected {
                         return Err("Xbox server sent more bytes than requested.".into());
                     }
+                    throttle_async(count as u64).await;
                     buffer.extend_from_slice(&bytes);
                     offset += count as u64;
                     if buffer.len() >= FLUSH_BYTES {
@@ -4163,7 +4107,6 @@ async fn download_xbox_range_async(
             limit.add_write_time(started.elapsed());
         }
         if offset == expected {
-            // Le dernier enregistrement du journal indique segment complet (octets == taille).
             return Ok(());
         }
         retries = retries.saturating_add(1);
@@ -4197,8 +4140,7 @@ fn has_xbox_range_data(partial_path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Octets déjà téléchargés d'un paquet Xbox partiel. Le fichier étant pré-dimensionné, sa
-/// longueur ne reflète plus l'avancement : on compte les segments du journal.
+/// Octets déjà téléchargés d'un paquet Xbox partiel.
 fn resumable_xbox_bytes(partial_path: &Path) -> u64 {
     let length = fs::metadata(partial_path)
         .map(|metadata| metadata.len())
@@ -4423,6 +4365,7 @@ fn transfer(
                     output
                         .write_all(&buffer[..count])
                         .map_err(|error| format!("Could not write the download: {error}"))?;
+                    throttle_blocking(count as u64);
                     received = received.saturating_add(count as u64);
                     if total > 0 && received > total {
                         return Err("The server sent more data than expected.".into());
@@ -4520,7 +4463,6 @@ fn partial_path(destination: &Path) -> PathBuf {
 }
 
 fn remove_partial(path: &Path) -> Result<(), String> {
-    // Journal des segments Xbox éventuel (voir `xbox_ranges_path`).
     let _ = fs::remove_file(xbox_ranges_path(path));
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -4600,70 +4542,25 @@ mod tests {
         assert_eq!(parse_content_range_total("bytes 12-24/*"), None);
     }
 
-    /// Les chunks Epic sont écrits dans un ordre arbitraire : un fichier ordinaire
-    /// forcerait NTFS à remplir de zéros tout l'espace entre la fin du fichier et l'offset
-    /// d'écriture. Ce test vérifie qu'un fichier marqué creux n'alloue que les octets
-    /// réellement écrits.
-    #[cfg(windows)]
     #[test]
-    fn sparse_output_files_avoid_zero_filling_gaps() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let folder = std::env::temp_dir().join(format!("universal-downloader-sparse-{nonce}"));
-        fs::create_dir_all(&folder).unwrap();
-        let path = folder.join("sparse.bin");
-        let file = File::create(&path).unwrap();
-        if mark_file_sparse(&file).is_err() {
-            // The volume does not support sparse files; nothing to assert.
-            let _ = fs::remove_dir_all(&folder);
-            return;
-        }
-        drop(file);
-        let chunk = vec![0xABu8; 1024 * 1024];
-        let offset = 512 * 1024 * 1024u64;
-        let mut output = OpenOptions::new().write(true).open(&path).unwrap();
-        let started = Instant::now();
-        output.seek(SeekFrom::Start(offset)).unwrap();
-        output.write_all(&chunk).unwrap();
-        output.flush().unwrap();
-        drop(output);
-        let logical = fs::metadata(&path).unwrap().len();
-        let allocated = allocated_size(&path).unwrap();
-        let elapsed = started.elapsed();
-        let _ = fs::remove_dir_all(&folder);
-        assert_eq!(logical, offset + chunk.len() as u64);
-        assert!(
-            allocated < 64 * 1024 * 1024,
-            "sparse file allocated {allocated} bytes for one 1 MiB chunk"
-        );
-        assert!(
-            elapsed < Duration::from_secs(10),
-            "writing one sparse chunk took {elapsed:?}"
-        );
+    fn bandwidth_limit_spaces_out_reservations() {
+        set_bandwidth_limit(1_000_000);
+        *THROTTLE_NEXT.lock().unwrap() = None;
+        let first = reserve_bandwidth(500_000);
+        let second = reserve_bandwidth(500_000);
+        set_bandwidth_limit(0);
+        assert_eq!(first, Duration::ZERO);
+        assert!(second >= Duration::from_millis(400));
     }
 
-    #[cfg(windows)]
-    fn allocated_size(path: &Path) -> io::Result<u64> {
-        use std::ffi::OsStr;
-        use std::os::windows::ffi::OsStrExt;
-
-        #[link(name = "kernel32")]
-        unsafe extern "system" {
-            fn GetCompressedFileSizeW(file_name: *const u16, high: *mut u32) -> u32;
+    #[test]
+    fn adaptive_concurrency_stays_within_bounds() {
+        let mut tuner = AdaptiveTuner::new();
+        let mut target = ADAPTIVE_MIN_WORKERS;
+        for _ in 0..200 {
+            target = tuner.next(target, 1e8);
+            assert!((ADAPTIVE_MIN_WORKERS..=ADAPTIVE_MAX_WORKERS).contains(&target));
         }
-
-        let wide: Vec<u16> = OsStr::new(path).encode_wide().chain(Some(0)).collect();
-        let mut high = 0u32;
-        let low = unsafe { GetCompressedFileSizeW(wide.as_ptr(), &mut high) };
-        if low == u32::MAX {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error().unwrap_or(0) != 0 {
-                return Err(error);
-            }
-        }
-        Ok(((u64::from(high)) << 32) | u64::from(low))
     }
 
     #[test]
@@ -4713,218 +4610,5 @@ mod tests {
         server.join().unwrap();
         assert_eq!(fs::read(&destination).unwrap(), body);
         fs::remove_dir_all(folder).unwrap();
-    }
-
-    /// Les chunks Epic passent par un seul client asynchrone : toutes les requêtes restent en
-    /// vol en même temps. Douze chunks servis avec 300 ms de latence prennent ~0,4 s en
-    /// parallèle, contre 3,6 s si les requêtes étaient menées l'une après l'autre.
-    #[test]
-    fn epic_chunks_are_fetched_concurrently() {
-        const CHUNKS: usize = 12;
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let body = epic_chunk_fixture(1024);
-        let server = thread::spawn(move || {
-            for _ in 0..CHUNKS {
-                let (mut stream, _) = listener.accept().unwrap();
-                let body = body.clone();
-                thread::spawn(move || {
-                    let mut reader = BufReader::new(stream.try_clone().unwrap());
-                    let mut line = String::new();
-                    let _ = reader.read_line(&mut line);
-                    drop(reader);
-                    thread::sleep(Duration::from_millis(300));
-                    write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        body.len()
-                    )
-                    .unwrap();
-                    stream.write_all(&body).unwrap();
-                });
-            }
-        });
-
-        let runtime = download_runtime().unwrap();
-        let started = Instant::now();
-        let results = runtime.block_on(async {
-            let client = async_client(Duration::from_secs(30)).unwrap();
-            let (progress_tx, _progress_rx) = tokio::sync::mpsc::channel(1024);
-            let limit = AdaptiveLimit::new(16);
-            let mut tasks = Vec::new();
-            for _ in 0..CHUNKS {
-                let client = client.clone();
-                let limit = Arc::clone(&limit);
-                let progress_tx = progress_tx.clone();
-                let url = format!("http://{address}/chunk");
-                tasks.push(tokio::spawn(async move {
-                    let chunk = EpicChunk {
-                        guid: [0; 4],
-                        hash: 0,
-                        group: 0,
-                        size: 1024,
-                    };
-                    fetch_epic_chunk_async(&client, &url, &chunk, &progress_tx, &limit).await
-                }));
-            }
-            let mut results = Vec::new();
-            for task in tasks {
-                results.push(task.await.unwrap());
-            }
-            results
-        });
-        let elapsed = started.elapsed();
-        server.join().unwrap();
-        assert!(
-            results
-                .iter()
-                .all(|result| result.as_ref().is_ok_and(|data| data.len() == 1024)),
-            "unexpected chunk results: {results:?}"
-        );
-        assert!(
-            elapsed < Duration::from_millis(1500),
-            "{CHUNKS} delayed chunks took {elapsed:?}; they were not fetched concurrently"
-        );
-    }
-
-    /// Les segments Xbox sont écrits directement à leur offset final : à la fin il ne reste ni
-    /// segment `.range.N` ni journal, et le fichier final est identique à la source.
-    #[test]
-    fn xbox_ranges_are_written_in_place() {
-        let total = XBOX_RANGE_BYTES * 2 + 12_345;
-        let data: Arc<Vec<u8>> = Arc::new((0..total).map(|i| (i % 251) as u8).collect());
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let served = Arc::clone(&data);
-        thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { break };
-                let data = Arc::clone(&served);
-                thread::spawn(move || {
-                    let mut reader = BufReader::new(stream.try_clone().unwrap());
-                    let mut range = (0u64, 0u64);
-                    let mut line = String::new();
-                    loop {
-                        line.clear();
-                        if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
-                            break;
-                        }
-                        if let Some(value) = line.to_ascii_lowercase().strip_prefix("range: bytes=")
-                        {
-                            let (a, b) = value.trim().split_once('-').unwrap();
-                            range = (a.parse().unwrap(), b.parse().unwrap());
-                        }
-                    }
-                    let (a, b) = range;
-                    let body = &data[a as usize..=b as usize];
-                    write!(
-                        stream,
-                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {a}-{b}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        data.len(),
-                        body.len()
-                    )
-                    .unwrap();
-                    let _ = stream.write_all(body);
-                });
-            }
-        });
-
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let folder = std::env::temp_dir().join(format!("universal-downloader-xbox-{nonce}"));
-        fs::create_dir_all(&folder).unwrap();
-        let destination = folder.join("package.msixvc");
-        let partial = partial_path(&destination);
-        File::create(&partial).unwrap();
-        let (tx, _rx) = mpsc::channel();
-        let control = Arc::new(Control::new());
-        let url = format!("http://{address}/package");
-        let done = transfer_xbox_ranges(&url, total, &destination, &partial, 1, &control, &tx);
-        assert!(done.unwrap());
-        assert_eq!(fs::read(&destination).unwrap(), *data);
-        let leftovers: Vec<_> = fs::read_dir(&folder)
-            .unwrap()
-            .filter_map(Result::ok)
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .collect();
-        let _ = fs::remove_dir_all(&folder);
-        assert_eq!(leftovers, vec!["package.msixvc".to_owned()]);
-    }
-
-    #[test]
-    fn adaptive_concurrency_follows_throughput() {
-        let mut tuner = AdaptiveTuner::new();
-        let mut target = 16usize;
-        // Stabilisation puis mesure de référence, puis premier palier d'essai.
-        let mut rate = 10e6;
-        for _ in 0..10 {
-            target = tuner.next(target, rate);
-        }
-        // On s'assure que le tuner a bien réagi (soit le pas, soit une valeur proche selon l'historique)
-        assert!(target >= 16);
-
-        // Le débit suit le nombre de connexions : on continue de monter.
-        for _ in 0..20 {
-            rate = target as f64 * 1e6;
-            target = tuner.next(target, rate);
-        }
-        assert!(target >= 16);
-
-        // Plateau : on revient au palier précédent et on ne descend jamais plus bas.
-        let plateau = target as f64 * 1e6;
-        let mut lowest = target;
-        for _ in 0..40 {
-            target = tuner.next(target, plateau);
-            lowest = lowest.min(target);
-        }
-        assert!(lowest + ADAPTIVE_STEP >= target);
-
-        // Pause : rien ne bouge.
-        assert_eq!(tuner.next(target, 0.0), target);
-
-        // Les bornes sont respectées.
-        let mut tuner = AdaptiveTuner::new();
-        let mut target = ADAPTIVE_MAX_WORKERS;
-        for _ in 0..30 {
-            target = tuner.next(target, 1e8);
-            assert!((ADAPTIVE_MIN_WORKERS..=ADAPTIVE_MAX_WORKERS).contains(&target));
-        }
-    }
-
-    /// Une pause en plein segment ne perd aucun octet : la reprise repart exactement du dernier
-    /// octet écrit.
-    #[test]
-    fn xbox_journal_resumes_at_the_byte() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let folder = std::env::temp_dir().join(format!("universal-downloader-journal-{nonce}"));
-        fs::create_dir_all(&folder).unwrap();
-        let partial = folder.join("package.msixvc.part");
-        let journal = xbox_ranges_path(&partial);
-        record_xbox_progress(&journal, 0, 1_048_576).unwrap();
-        record_xbox_progress(&journal, 0, 2_097_152).unwrap();
-        record_xbox_progress(&journal, XBOX_RANGE_BYTES, 777).unwrap();
-        let progress = read_xbox_progress(&journal, XBOX_RANGE_BYTES * 3);
-        let _ = fs::remove_dir_all(&folder);
-        assert_eq!(progress.get(&0), Some(&2_097_152));
-        assert_eq!(progress.get(&XBOX_RANGE_BYTES), Some(&777));
-    }
-
-    /// Construit un chunk Epic non compressé valide (en-tête version 1).
-    fn epic_chunk_fixture(size: usize) -> Vec<u8> {
-        const HEADER: u32 = 4 * 4 + 16 + 8 + 1;
-        let mut raw = Vec::with_capacity(HEADER as usize + size);
-        raw.extend_from_slice(&0xB1FE3AA2u32.to_le_bytes());
-        raw.extend_from_slice(&1u32.to_le_bytes());
-        raw.extend_from_slice(&HEADER.to_le_bytes());
-        raw.extend_from_slice(&(size as u32).to_le_bytes());
-        raw.extend_from_slice(&[0u8; 24]);
-        raw.push(0);
-        raw.extend_from_slice(&vec![0x5Au8; size]);
-        raw
     }
 }

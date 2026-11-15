@@ -4217,7 +4217,7 @@ checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 
 [[package]]
 name = "universal-downloader"
-version = "0.1.45"
+version = "0.1.48"
 dependencies = [
  "eframe",
  "egui_extras",
